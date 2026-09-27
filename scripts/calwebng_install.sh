@@ -1,10 +1,13 @@
 #!/bin/bash
 ###############################################################################
-# Calibre-Web NextGen Installation Script
-# Based on manual installation process for github.com/new-usemame/Calibre-NextGen
+# Calibre-Web NextGen Installation Script (Verbose Mode)
+# Shows ALL commands and output in real-time
 ###############################################################################
 
-set -e  # Exit on error
+# Show each command before executing (trace mode)
+set -x
+# Exit on error
+set -e
 
 #######################################
 # Configuration (Edit these values)
@@ -13,7 +16,7 @@ INSTALL_DIR="/opt/calibre-web-nextgen"
 CONFIG_DIR="${INSTALL_DIR}/config"
 SERVICE_USER="acw"
 SERVICE_GROUP="acw"
-USER_USER="youusername"
+USER_USER="yourusername"
 CALIBRE_LIBRARY="/path/to/your/library"
 PORT="8083"
 TIMEZONE="Etc/UTC"
@@ -28,33 +31,23 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 #######################################
-# Logging function
-#######################################
-log() {
-    echo -e "${GREEN}[INSTALL]${NC} $1" | tee -a "$INSTALL_LOG"
-}
-
-warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$INSTALL_LOG"
-}
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$INSTALL_LOG"
-    exit 1
-}
-
-#######################################
 # Check if running as root
 #######################################
 if [ "$EUID" -ne 0 ]; then 
-    error "Please run as root (sudo ./calwebng_install.sh)"
+    echo -e "${RED}[ERROR]${NC} Please run as root (sudo ./install.sh)"
+    exit 1
 fi
+
+echo -e "${GREEN}[INSTALL]${NC} Starting Calibre-Web NextGen installation..."
+echo ""
 
 #######################################
 # Step 1: Install System Dependencies
 #######################################
-log "Installing system dependencies..."
-apt-get update >> "$INSTALL_LOG" 2>&1
+echo -e "${YELLOW}[STEP 1]${NC} Installing system dependencies..."
+echo "--- apt-get update ---"
+apt-get update
+echo "--- apt-get install dependencies ---"
 apt-get install -y \
     python3 \
     python3-pip \
@@ -67,45 +60,51 @@ apt-get install -y \
     python3-dev \
     libldap2-dev \
     libsasl2-dev \
-    libssl-dev >> "$INSTALL_LOG" 2>&1
+    libssl-dev
 
-log "System dependencies installed."
-
+echo -e "${GREEN}[INSTALL]${NC} System dependencies installed."
+echo ""
 
 #######################################
 # Step 2: Create Service User
 #######################################
-log "Creating service user '$SERVICE_USER'..."
+echo -e "${YELLOW}[STEP 4]${NC} Creating service user '$SERVICE_USER'..."
 if ! id "$SERVICE_USER" &>/dev/null; then
     useradd -r -s /bin/false -d "$INSTALL_DIR" "$SERVICE_USER"
-    log "Service user created."
+    echo -e "${GREEN}[INSTALL]${NC} Service user created."
 else
-    warn "User '$SERVICE_USER' already exists, skipping."
+    echo -e "${RED}[WARN]${NC} User '$SERVICE_USER' already exists, skipping."
 fi
+echo ""
 
 usermod -a -G "$SERVICE_GROUP" "$USER_USER"
 
 #######################################
 # Step 3: Set Up Virtual Environment
 #######################################
-log "Setting up Python virtual environment..."
+echo -e "${YELLOW}[STEP 5]${NC} Setting up Python virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel >> "$INSTALL_LOG" 2>&1
-./venv/bin/python3 -m pip install -e . >> "$INSTALL_LOG" 2>&1
-log "Virtual environment and dependencies installed."
+echo "--- Upgrading pip/setuptools/wheel ---"
+python -m pip install --upgrade pip setuptools wheel
+echo "--- Installing package dependencies ---"
+./venv/bin/python3 -m pip install -e .
+echo -e "${GREEN}[INSTALL]${NC} Virtual environment and dependencies installed."
+echo ""
 
 #######################################
 # Step 4: Create Config Directory
 #######################################
-log "Creating config directory..."
+echo -e "${YELLOW}[STEP 6]${NC} Creating config directory..."
 mkdir -p "$CONFIG_DIR"
-log "Config directory created at $CONFIG_DIR"
+ls -la "$CONFIG_DIR"
+echo -e "${GREEN}[INSTALL]${NC} Config directory created at $CONFIG_DIR"
+echo ""
 
 #######################################
 # Step 5: Create Systemd Service File
 #######################################
-log "Creating systemd service file..."
+echo -e "${YELLOW}[STEP 7]${NC} Creating systemd service file..."
 cat > /etc/systemd/system/calibre-web-nextgen.service << EOF
 [Unit]
 Description=Calibre-Web NextGen
@@ -117,6 +116,7 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 Environment="PATH=${INSTALL_DIR}/venv/bin"
+Environment="TZ=${TIMEZONE}"
 ExecStart=${INSTALL_DIR}/venv/bin/python cps.py -p ${CONFIG_DIR}/app.db
 Restart=always
 RestartSec=10
@@ -125,47 +125,57 @@ UMask=022
 [Install]
 WantedBy=multi-user.target
 EOF
-log "Systemd service file created."
+
+echo "--- Service file contents ---"
+cat /etc/systemd/system/calibre-web-nextgen.service
+echo -e "${GREEN}[INSTALL]${NC} Systemd service file created."
+echo ""
 
 #######################################
 # Step 6: Set Permissions
 #######################################
-log "Setting file permissions..."
-chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$INSTALL_DIR"
+echo -e "${YELLOW}[STEP 8]${NC} Setting file permissions..."
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 chmod -R 755 "$INSTALL_DIR"
 chmod 775 "$CONFIG_DIR"
-setfacl -R -m u:${SERVICE_GROUP}:rwx ${CALIBRE_LIBRARY}
-
-# Note: Adjust this to YOUR actual library path
-warn "IMPORTANT: Run 'sudo setfacl -R -m u:${SERVICE_GROUP}:rwx ${CALIBRE_LIBRARY}' for your library access"
+echo "--- Permissions set ---"
+ls -la "$INSTALL_DIR"
+echo ""
+echo -e "${RED}[WARN]${NC} IMPORTANT: Run this command for your library:"
+echo "   sudo setfacl -R -m u:${SERVICE_USER}:rwx '${CALIBRE_LIBRARY}'"
+echo ""
 
 #######################################
-# Step 7: Initialize Database with Library Path
+# Step 7: Initialize Database
 #######################################
-log "Initializing application database with library path..."
+echo -e "${YELLOW}[STEP 9]${NC} Initializing application database..."
 
 if [ -f "${CONFIG_DIR}/app.db" ]; then
-    warn "app.db already exists, updating config_calibre_dir..."
+    echo -e "${RED}[WARN]${NC} app.db already exists, updating config_calibre_dir..."
 else
-    log "Starting service once to create app.db schema..."
+    echo "Starting service once to create app.db schema..."
     systemctl daemon-reload
     systemctl start calibre-web-nextgen
     sleep 10
+    echo "Stopping service to configure database..."
     systemctl stop calibre-web-nextgen 2>/dev/null || true
 fi
 
-# Set the library directory in settings table
-sqlite3 "${CONFIG_DIR}/app.db" <<EOF
+echo "--- Setting library path in database (with proper quoting) ---"
+# Use printf to safely handle paths with spaces/special chars
+sqlite3 "${CONFIG_DIR}/app.db" << EOF
 UPDATE settings SET config_calibre_dir = '${CALIBRE_LIBRARY}' WHERE id = 1;
 .quit
 EOF
 
-log "Database initialized with library path: ${CALIBRE_LIBRARY}"
-
+echo "--- Verifying configuration ---"
+sqlite3 "${CONFIG_DIR}/app.db" "SELECT config_calibre_dir FROM settings WHERE id = 1;"
+echo -e "${GREEN}[INSTALL]${NC} Database initialized with library path: ${CALIBRE_LIBRARY}"
+echo ""
 #######################################
 # Step 8: Enable and Start Service
 #######################################
-log "Enabling and starting service..."
+echo -e "${YELLOW}[STEP 10]${NC} Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable calibre-web-nextgen
 systemctl start calibre-web-nextgen
@@ -173,36 +183,42 @@ systemctl start calibre-web-nextgen
 #######################################
 # Step 9: Verify Installation
 #######################################
-log ""
-log "=========================================="
-log "Installation Complete!"
-log "=========================================="
-log ""
-log "Service Status:"
-systemctl status calibre-web-nextgen --no-pager | head -15
-log ""
-log "Recent Logs:"
-journalctl -u calibre-web-nextgen -n 20 --no-pager
-log ""
-log "=========================================="
-log "Access Information"
-log "=========================================="
-log "URL: http://localhost:${PORT}"
-log "Username: admin"
-log "Password: admin123"
-log ""
-log "IMPORTANT POST-INSTALLATION STEPS:"
-log "1. Set ACL on your library directory:"
-log "   sudo setfacl -R -m u:${SERVICE_USER}:rwx ${CALIBRE_LIBRARY}"
-log "2. Change admin password immediately in Admin > Edit User"
-log "3. Configure uploads in Admin > Basic Configuration"
-log ""
-log "Installation log saved to: $INSTALL_LOG"
-log "=========================================="
+echo ""
+echo -e "${GREEN}[INSTALL]${NC} ==="
+echo -e "${GREEN}[INSTALL]${NC} Installation Complete!"
+echo -e "${GREEN}[INSTALL]${NC} ==="
+echo ""
+echo -e "${YELLOW}[INFO]${NC} Service Status:"
+systemctl status calibre-web-nextgen --no-pager
+echo ""
+echo -e "${YELLOW}[INFO]${NC} Recent Logs:"
+journalctl -u calibre-web-nextgen -n 30 --no-pager
+echo ""
+echo -e "${GREEN}[INSTALL]${NC} ==="
+echo -e "${GREEN}[INSTALL]${NC} Access Information"
+echo -e "${GREEN}[INSTALL]${NC} ==="
+echo -e "${GREEN}[INSTALL]${NC} URL: http://localhost:${PORT}"
+echo -e "${GREEN}[INSTALL]${NC} Username: admin"
+echo -e "${GREEN}[INSTALL]${NC} Password: admin123"
+echo ""
+echo -e "${GREEN}[INSTALL]${NC} ==="
+echo -e "${GREEN}[INSTALL]${NC} Post-Installation Checklist"
+echo -e "${GREEN}[INSTALL]${NC} ==="
+echo ""
+echo "Run these commands:"
+echo "  1. sudo setfacl -R -m u:${SERVICE_USER}:rwx '${CALIBRE_LIBRARY}'"
+echo "  2. sudo usermod -a -G ${SERVICE_USER} yourUsername"
+echo "  3. Change admin password in Admin > Edit User"
+echo ""
 
 # Final check
 if systemctl is-active --quiet calibre-web-nextgen; then
-    log "✓ Service is running successfully!"
+    echo -e "${GREEN}[SUCCESS]${NC} ✓ Service is running successfully!"
 else
-    warn "✗ Service failed to start. Check logs above."
+    echo -e "${RED}[FAILED]${NC} ✗ Service failed to start. Check logs above."
 fi
+
+# Turn off trace mode at the end
+set +x
+echo ""
+echo -e "${GREEN}[INSTALL]${NC} Script completed."
