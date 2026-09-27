@@ -39,6 +39,7 @@ Library, settings, users, OAuth tokens, and KOReader sync state are preserved. S
 
 - [Why this fork exists](#why-this-fork-exists)
 - [What's included](#whats-included)
+- [Dockerless Install](#dockerless-install)
 - [Quick start](#quick-start)
 - [Full Docker Compose setup](#full-docker-compose-setup)
 - [Runtime path overrides for packagers](#runtime-path-overrides-for-packagers)
@@ -88,6 +89,20 @@ Everything CWA has, plus the patches in [`CHANGES-vs-upstream.md`](CHANGES-vs-up
 - `.cbr` and `.cbz` use IANA-registered mimetypes in OPDS feeds.
 - Higher-resolution covers from Google Books, Amazon, and an iTunes-backed fallback for high-DPI e-readers (Libra Color, etc.).
 - Translation PRs merged: ja, fr, cs, hu, zh_Hans, zh_Hant, and others.
+
+---
+
+## Dockerless install
+
+```
+sudo mkdir /opt/calibre-web-nextgen
+cd /opt/calibre-web-nextgen
+git clone https://github.com/avalkon/Calibre-Web-NextGen--no-docker.git .
+sudo ./scripts/calwebng_install.sh
+```
+
+
+
 
 ---
 
