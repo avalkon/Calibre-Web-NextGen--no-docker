@@ -109,6 +109,7 @@ CALIBRE_LIBRARY="/path/to/your/library"
 ```
 Finally:
 ```
+sudo chmod +x ./scripts/calwebng_install.sh
 sudo ./scripts/calwebng_install.sh
 ```
 
