@@ -97,7 +97,7 @@ Everything CWA has, plus the patches in [`CHANGES-vs-upstream.md`](CHANGES-vs-up
 ```
 sudo mkdir /opt/calibre-web-nextgen
 cd /opt/calibre-web-nextgen
-git clone https://github.com/avalkon/Calibre-Web-NextGen--no-docker.git .
+sudo git clone https://github.com/avalkon/Calibre-Web-NextGen--no-docker.git .
 ```
 ```sudo nano scripts/calwebng_install.sh ```:
 
