@@ -71,26 +71,9 @@ apt-get install -y \
 
 log "System dependencies installed."
 
-#######################################
-# Step 2: Create Installation Directory
-#######################################
-log "Creating installation directory..."
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR"
 
 #######################################
-# Step 3: Clone Repository
-#######################################
-log "Cloning Calibre-Web NextGen repository..."
-if [ -d ".git" ]; then
-    warn "Repository already exists, skipping clone."
-else
-    git clone https://github.com/new-usemame/Calibre-Web-NextGen.git . >> "$INSTALL_LOG" 2>&1
-    log "Repository cloned."
-fi
-
-#######################################
-# Step 4: Create Service User
+# Step 2: Create Service User
 #######################################
 log "Creating service user '$SERVICE_USER'..."
 if ! id "$SERVICE_USER" &>/dev/null; then
@@ -103,7 +86,7 @@ fi
 usermod -a -G "$SERVICE_GROUP" "$USER_USER"
 
 #######################################
-# Step 5: Set Up Virtual Environment
+# Step 3: Set Up Virtual Environment
 #######################################
 log "Setting up Python virtual environment..."
 python3 -m venv venv
@@ -113,14 +96,14 @@ python -m pip install --upgrade pip setuptools wheel >> "$INSTALL_LOG" 2>&1
 log "Virtual environment and dependencies installed."
 
 #######################################
-# Step 6: Create Config Directory
+# Step 4: Create Config Directory
 #######################################
 log "Creating config directory..."
 mkdir -p "$CONFIG_DIR"
 log "Config directory created at $CONFIG_DIR"
 
 #######################################
-# Step 7: Create Systemd Service File
+# Step 5: Create Systemd Service File
 #######################################
 log "Creating systemd service file..."
 cat > /etc/systemd/system/calibre-web-nextgen.service << EOF
@@ -145,7 +128,7 @@ EOF
 log "Systemd service file created."
 
 #######################################
-# Step 8: Set Permissions
+# Step 6: Set Permissions
 #######################################
 log "Setting file permissions..."
 chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$INSTALL_DIR"
@@ -154,10 +137,10 @@ chmod 775 "$CONFIG_DIR"
 setfacl -R -m u:${SERVICE_GROUP}:rwx ${CALIBRE_LIBRARY}
 
 # Note: Adjust this to YOUR actual library path
-warn "IMPORTANT: Run 'sudo setfacl -R -m u:${SERVICE_USER}:rwx ${CALIBRE_LIBRARY}' for your library access"
+warn "IMPORTANT: Run 'sudo setfacl -R -m u:${SERVICE_GROUP}:rwx ${CALIBRE_LIBRARY}' for your library access"
 
 #######################################
-# Step 9: Initialize Database with Library Path
+# Step 7: Initialize Database with Library Path
 #######################################
 log "Initializing application database with library path..."
 
@@ -180,7 +163,7 @@ EOF
 log "Database initialized with library path: ${CALIBRE_LIBRARY}"
 
 #######################################
-# Step 10: Enable and Start Service
+# Step 8: Enable and Start Service
 #######################################
 log "Enabling and starting service..."
 systemctl daemon-reload
@@ -188,7 +171,7 @@ systemctl enable calibre-web-nextgen
 systemctl start calibre-web-nextgen
 
 #######################################
-# Step 11: Verify Installation
+# Step 9: Verify Installation
 #######################################
 log ""
 log "=========================================="
