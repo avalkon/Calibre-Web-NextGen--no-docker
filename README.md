@@ -98,11 +98,19 @@ Everything CWA has, plus the patches in [`CHANGES-vs-upstream.md`](CHANGES-vs-up
 sudo mkdir /opt/calibre-web-nextgen
 cd /opt/calibre-web-nextgen
 git clone https://github.com/avalkon/Calibre-Web-NextGen--no-docker.git .
+```
+```sudo nano scripts/calwebng_install.sh ```:
+
+```
+SERVICE_USER="if acw is already a user, change this."
+SERVICE_GROUP="same as SERVICE_USER"
+USER_USER="yourusername"
+CALIBRE_LIBRARY="/path/to/your/library"
+```
+Finally:
+```
 sudo ./scripts/calwebng_install.sh
 ```
-
-
-
 
 ---
 
