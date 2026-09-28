@@ -104,7 +104,11 @@ def test_ldap_success_provisions_once_authenticates_and_resets_failure_buckets(
     assert [h.login().status_code for _ in range(42)] == [200] * 42
     assert h.session.query(ub.User).count() == 1
     assert h.directory.get_object_details.call_count == (0 if already_exists else 1)
-    assert [h.login('local-password').status_code for _ in range(4)] == [401, 401, 401, 429]
+    # A password that matches neither the directory nor the stored local
+    # hash must still be paced as a failure (the local hash itself now
+    # signs in — see test_local_only_account_signs_in_* below).
+    assert [h.login('neither-directory-nor-local').status_code
+            for _ in range(4)] == [401, 401, 401, 429]
 
 
 @pytest.mark.parametrize('failure', ['bad_password', 'directory_error', 'missing_details', 'invalid_details', 'email_conflict'])
@@ -159,3 +163,102 @@ def test_directory_login_respects_instance_switches(ldap_login, monkeypatch, set
         h.existing()
         assert h.login('local-password').status_code == 200
         h.directory.bind_user.assert_not_called()
+
+
+def _session_user_id(client):
+    with client.session_transaction() as cookie:
+        return int(cookie.get('_user_id', 0) or 0)
+
+
+@pytest.mark.parametrize('outcome', ['rejects', 'does_not_know_account',
+                                     'unreachable', 'bind_raises'])
+def test_local_only_account_signs_in_for_every_directory_outcome(
+        ldap_login, outcome):
+    """Every way the directory can fail still reaches the stored local hash.
+
+    `cps/services/simpleldap.py::bind_user()` documents True / False / None:
+    the directory can reject the credentials (False), have no idea who the
+    account is (None), or be unable to answer at all (None plus an error).
+    #1930 made the classic form fall back in each of those cases; the API
+    endpoint has to behave the same, or a local-only administrator can only
+    sign in through the classic pages.
+    """
+    h = ldap_login
+    documented = {
+        'rejects': (False, None),
+        'does_not_know_account': (None, None),
+        'unreachable': (None, 'LDAP Server down: 127.0.0.1:389'),
+    }
+    if outcome == 'bind_raises':
+        # Defensive: the service layer swallows LDAPException today, but the
+        # endpoint wraps the bind anyway.
+        h.directory.bind_user.side_effect = RuntimeError('directory unavailable')
+    else:
+        result = documented[outcome]
+        h.directory.bind_user.side_effect = lambda name, password: result
+
+    user = h.existing()      # stored hash: local-password; not in the directory
+    response = h.login('local-password')
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()['id'] == user.id
+    assert _session_user_id(h.client) == user.id
+    # The fallback authenticates, it does not provision: nothing is created
+    # or re-provisioned behind the directory's back.
+    assert h.session.query(ub.User).count() == 1
+    assert h.directory.get_object_details.call_count == 0
+    # A password that matches neither store is still refused.
+    assert h.login('not-the-password').status_code == 401
+    assert _session_user_id(h.client) == user.id
+
+
+def test_directory_account_has_no_local_password_to_fall_back_to(ldap_login):
+    """Directory-sourced accounts hold an empty local hash — no fallback.
+
+    The fallback must not turn an empty stored password into a credential:
+    those accounts keep authenticating against the directory only.
+    """
+    h = ldap_login
+    user = h.existing()
+    user.password = ''
+    h.session.commit()
+    assert h.login('local-password').status_code == 401
+    assert _session_user_id(h.client) == 0
+    h.directory.bind_user.side_effect = \
+        lambda name, password: (None, 'LDAP Server down: 127.0.0.1:389')
+    assert h.login('local-password').status_code == 401
+    assert _session_user_id(h.client) == 0
+
+
+def test_local_fallback_sign_in_resets_the_failure_window(ldap_login):
+    """A fallback sign-in clears the failure buckets like a directory bind does.
+
+    Without the reset, the two failures before the fallback and the two after
+    it share one 3-per-minute window: the fourth failure answers 429 and the
+    administrator is locked out of the next, correct, attempt too.
+    """
+    h = ldap_login
+    h.directory.bind_user.side_effect = \
+        lambda name, password: (None, 'LDAP Server down: 127.0.0.1:389')
+    h.existing()
+    assert [h.login('wrong').status_code for _ in range(2)] == [401, 401]
+    assert h.login('local-password').status_code == 200
+    assert [h.login('wrong').status_code for _ in range(2)] == [401, 401]
+    assert h.login('local-password').status_code == 200
+
+
+@pytest.mark.parametrize('login_type', [constants.LOGIN_LDAP, constants.LOGIN_STANDARD])
+@pytest.mark.parametrize('password', [12345, ['local-password'], {'x': 1}, True])
+def test_non_string_password_is_a_plain_failure_for_every_account(
+        ldap_login, monkeypatch, login_type, password):
+    """A malformed password answers 401 whether or not the account has a hash.
+
+    A 500 only for accounts that hold a local hash would tell a caller which
+    names are local-only accounts -- the ones the directory fallback accepts.
+    """
+    h = ldap_login
+    monkeypatch.setattr(config, 'config_login_type', login_type, raising=False)
+    h.existing()
+    for name in ('reader', 'nobody-here'):
+        response = h.client.post('/api/v1/auth/login',
+                                 json={'username': name, 'password': password})
+        assert response.status_code == 401, (name, response.status_code)

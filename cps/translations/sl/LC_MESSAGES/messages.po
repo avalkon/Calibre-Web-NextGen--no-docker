@@ -4879,6 +4879,11 @@ msgid "Allowed groups (comma-separated)"
 msgstr ""
 
 #: cps/spa_strings.py
+#, python-brace-format
+msgid "Also on {names}"
+msgstr ""
+
+#: cps/spa_strings.py
 msgid "Annotation pages"
 msgstr ""
 
@@ -5457,6 +5462,10 @@ msgstr ""
 
 #: cps/spa_strings.py
 msgid "Could not rename this source. Try again."
+msgstr ""
+
+#: cps/spa_strings.py
+msgid "Could not request a full Kobo sync."
 msgstr ""
 
 #: cps/spa_strings.py
@@ -6168,6 +6177,10 @@ msgid ""
 "your server and account: nothing to type on the e-reader."
 msgstr ""
 
+#: cps/spa_strings.py cps/templates/user_edit.html
+msgid "Force full kobo sync"
+msgstr "Vsili popolno sinhronizacijo s Kobo"
+
 #: cps/spa_strings.py
 msgid "Forgot password?"
 msgstr ""
@@ -6198,6 +6211,10 @@ msgstr ""
 
 #: cps/spa_strings.py
 msgid "Full screen"
+msgstr ""
+
+#: cps/spa_strings.py
+msgid "Full sync requested. Sync your Kobo to receive your library again."
 msgstr ""
 
 #: cps/spa_strings.py
@@ -7067,6 +7084,11 @@ msgid ""
 msgstr ""
 
 #: cps/spa_strings.py
+#, python-brace-format
+msgid "On shelf {name}"
+msgstr ""
+
+#: cps/spa_strings.py
 msgid ""
 "On the e-reader, open Tools ▸ CWNG library ▸ Connect this device and choose "
 "Connect with a code."
@@ -7784,6 +7806,12 @@ msgid "Send"
 msgstr "Pošlji"
 
 #: cps/spa_strings.py
+msgid ""
+"Send every book to your Kobo again on its next sync? Books already on it are "
+"sent again too."
+msgstr ""
+
+#: cps/spa_strings.py
 msgid "Send failed."
 msgstr ""
 
@@ -7941,6 +7969,10 @@ msgstr ""
 
 #: cps/spa_strings.py
 msgid "Show password"
+msgstr ""
+
+#: cps/spa_strings.py
+msgid "Show shelf tags"
 msgstr ""
 
 #: cps/spa_strings.py
@@ -15239,10 +15271,6 @@ msgstr "Žeton za sinhronizacijo Kobo"
 #: cps/templates/user_edit.html
 msgid "Create/View"
 msgstr "Ustvari/pogled"
-
-#: cps/templates/user_edit.html
-msgid "Force full kobo sync"
-msgstr "Vsili popolno sinhronizacijo s Kobo"
 
 #: cps/templates/user_edit.html
 msgid "Resend one book to this Kobo"

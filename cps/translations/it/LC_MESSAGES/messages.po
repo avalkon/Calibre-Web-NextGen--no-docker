@@ -5050,6 +5050,11 @@ msgid "Allowed groups (comma-separated)"
 msgstr "Gruppi autorizzati (separati da virgole)"
 
 #: cps/spa_strings.py
+#, python-brace-format
+msgid "Also on {names}"
+msgstr ""
+
+#: cps/spa_strings.py
 msgid "Annotation pages"
 msgstr "Pagine annotazioni"
 
@@ -5635,6 +5640,10 @@ msgstr "Impossibile rinominare lo scaffale."
 
 #: cps/spa_strings.py
 msgid "Could not rename this source. Try again."
+msgstr ""
+
+#: cps/spa_strings.py
+msgid "Could not request a full Kobo sync."
 msgstr ""
 
 #: cps/spa_strings.py
@@ -6367,6 +6376,10 @@ msgid ""
 "your server and account: nothing to type on the e-reader."
 msgstr ""
 
+#: cps/spa_strings.py cps/templates/user_edit.html
+msgid "Force full kobo sync"
+msgstr "Forza sincronizzazione kobo completa"
+
 #: cps/spa_strings.py
 msgid "Forgot password?"
 msgstr "Password dimenticata?"
@@ -6398,6 +6411,10 @@ msgstr "Indirizzo mittente"
 #: cps/spa_strings.py
 msgid "Full screen"
 msgstr "A schermo intero"
+
+#: cps/spa_strings.py
+msgid "Full sync requested. Sync your Kobo to receive your library again."
+msgstr ""
 
 #: cps/spa_strings.py
 msgid "Generate a new link"
@@ -7298,6 +7315,11 @@ msgstr ""
 "questo codice o apri il link sottostante per autorizzare questo dispositivo."
 
 #: cps/spa_strings.py
+#, python-brace-format
+msgid "On shelf {name}"
+msgstr ""
+
+#: cps/spa_strings.py
 msgid ""
 "On the e-reader, open Tools ▸ CWNG library ▸ Connect this device and choose "
 "Connect with a code."
@@ -8040,6 +8062,12 @@ msgid "Send"
 msgstr "Invia"
 
 #: cps/spa_strings.py
+msgid ""
+"Send every book to your Kobo again on its next sync? Books already on it are "
+"sent again too."
+msgstr ""
+
+#: cps/spa_strings.py
 msgid "Send failed."
 msgstr "Invio fallito."
 
@@ -8200,6 +8228,10 @@ msgstr ""
 #: cps/spa_strings.py
 msgid "Show password"
 msgstr "Mostra la password"
+
+#: cps/spa_strings.py
+msgid "Show shelf tags"
+msgstr ""
 
 #: cps/spa_strings.py
 msgid ""
@@ -15813,10 +15845,6 @@ msgstr "Token di sincronizzazione Kobo"
 #: cps/templates/user_edit.html
 msgid "Create/View"
 msgstr "Crea/Visualizza"
-
-#: cps/templates/user_edit.html
-msgid "Force full kobo sync"
-msgstr "Forza sincronizzazione kobo completa"
 
 #: cps/templates/user_edit.html
 msgid "Resend one book to this Kobo"

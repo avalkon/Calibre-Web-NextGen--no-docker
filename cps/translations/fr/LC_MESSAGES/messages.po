@@ -5091,6 +5091,11 @@ msgid "Allowed groups (comma-separated)"
 msgstr "Groupes autorisés (séparés par des virgules)"
 
 #: cps/spa_strings.py
+#, python-brace-format
+msgid "Also on {names}"
+msgstr "Aussi sur {names}"
+
+#: cps/spa_strings.py
 msgid "Annotation pages"
 msgstr "Pages d’annotations"
 
@@ -5689,6 +5694,10 @@ msgstr "Impossible de renommer l’étagère."
 #: cps/spa_strings.py
 msgid "Could not rename this source. Try again."
 msgstr "Impossible de renommer cette source. Réessayez."
+
+#: cps/spa_strings.py
+msgid "Could not request a full Kobo sync."
+msgstr "Impossible de demander une synchronisation complète Kobo."
 
 #: cps/spa_strings.py
 msgid "Could not request deletion from this device."
@@ -6441,6 +6450,10 @@ msgstr ""
 "Pour une liseuse que vous pouvez brancher sur cet ordinateur. Le module "
 "connaît déjà votre serveur et votre compte : rien à saisir sur la liseuse."
 
+#: cps/spa_strings.py cps/templates/user_edit.html
+msgid "Force full kobo sync"
+msgstr "Forcer une synchronisation complète Kobo"
+
 #: cps/spa_strings.py
 msgid "Forgot password?"
 msgstr "Mot de passe oublié ?"
@@ -6473,6 +6486,12 @@ msgstr "Adresse de l’expéditeur"
 #: cps/spa_strings.py
 msgid "Full screen"
 msgstr "Plein écran"
+
+#: cps/spa_strings.py
+msgid "Full sync requested. Sync your Kobo to receive your library again."
+msgstr ""
+"Synchronisation complète demandée. Synchronisez votre Kobo pour recevoir à "
+"nouveau votre bibliothèque."
 
 #: cps/spa_strings.py
 msgid "Generate a new link"
@@ -7379,6 +7398,11 @@ msgstr ""
 "le lien ci-dessous pour autoriser cet appareil."
 
 #: cps/spa_strings.py
+#, python-brace-format
+msgid "On shelf {name}"
+msgstr "Sur l'étagère {name}"
+
+#: cps/spa_strings.py
 msgid ""
 "On the e-reader, open Tools ▸ CWNG library ▸ Connect this device and choose "
 "Connect with a code."
@@ -8134,6 +8158,14 @@ msgid "Send"
 msgstr "Envoyer"
 
 #: cps/spa_strings.py
+msgid ""
+"Send every book to your Kobo again on its next sync? Books already on it are "
+"sent again too."
+msgstr ""
+"Renvoyer tous les livres vers votre Kobo lors de sa prochaine "
+"synchronisation ? Les livres déjà présents sont aussi renvoyés."
+
+#: cps/spa_strings.py
 msgid "Send failed."
 msgstr "Échec de l’envoi."
 
@@ -8296,6 +8328,10 @@ msgstr "Afficher plus"
 #: cps/spa_strings.py
 msgid "Show password"
 msgstr "Afficher le mot de passe"
+
+#: cps/spa_strings.py
+msgid "Show shelf tags"
+msgstr "Afficher les étiquettes d'étagère"
 
 #: cps/spa_strings.py
 msgid ""
@@ -15717,10 +15753,6 @@ msgstr "Jeton de synchronisation Kobo"
 #: cps/templates/user_edit.html
 msgid "Create/View"
 msgstr "Créer/visualiser"
-
-#: cps/templates/user_edit.html
-msgid "Force full kobo sync"
-msgstr "Forcer une synchronisation complète Kobo"
 
 #: cps/templates/user_edit.html
 msgid "Resend one book to this Kobo"

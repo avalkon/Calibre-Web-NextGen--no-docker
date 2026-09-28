@@ -279,7 +279,10 @@ def auth_login():
 
     data = _request_data()
     username = _normalized_username(data)
-    password = data.get("password") or ""
+    password = data.get("password")
+    # Same rule as the username: a malformed value is a missing one, so it
+    # fails like any wrong password instead of raising inside the hash check.
+    password = password if isinstance(password, str) else ""
     user = ub.session.query(ub.User).filter(func.lower(ub.User.name) == username).first()
 
     # ── LDAP authentication ────────────────────────────────────────────
@@ -302,7 +305,25 @@ def auth_login():
                     log.error("LDAP bind error for '%s': %s", username, error)
             except Exception as ex:
                 log.error("LDAP authentication error for '%s': %s", username, ex)
-            # LDAP bind failed — fall through to 401 below.
+            # The directory did not sign this user in — rejection, an
+            # account it does not know, or an unreachable server. Fall back
+            # to the stored local password, as the classic /login form does
+            # (#1930 completed that fallback): a local-only account
+            # (typically an administrator) must still reach an LDAP-enabled
+            # instance when the directory is down or does not know the
+            # account. Directory-sourced accounts are created with an empty
+            # local hash and fail this check until someone gives them a
+            # local password (password reset, profile form, admin edit);
+            # after that, as on /login, a directory rejection no longer
+            # revokes it.
+            if user.password and check_password_hash(str(user.password), password):
+                log.info("Local Fallback Login as: '%s' (directory did not "
+                         "authenticate this account)", user.name)
+                login_user(user, remember=bool(data.get("remember")))
+                _clear_current_rate_limits()
+                return jsonify(_me_payload(user))
+            # LDAP bind failed and the stored local password is wrong —
+            # fall through to 401 below.
         elif getattr(config, 'config_ldap_auto_create_users', True):
             # User not found locally — try LDAP bind and auto-create if
             # the directory recognises the credentials (needed for OPDS /

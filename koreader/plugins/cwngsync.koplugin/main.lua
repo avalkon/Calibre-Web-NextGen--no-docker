@@ -351,10 +351,14 @@ function CWNGSync:addToMainMenu(menu_items)
                 callback = function()
                     self.settings.library_enabled = not self.settings.library_enabled
                     if self.settings.library_enabled then
-                        self:applyReaderDefaults()
+                        -- A reader turning this on already has KOReader set up
+                        -- (a home folder, another home-screen plugin): that is
+                        -- theirs, so only the library is shown (#2329).
+                        self:showLibrary()
                         self:syncLibrary({ force = true, interactive = true })
                     else
                         Home.closeFor(self.ui)
+                        self:restoreReaderDefaults()
                     end
                 end,
             },
@@ -1527,7 +1531,10 @@ function CWNGSync:collectDeliveries(
                     self:clearDeliveryReceipt(delivery.id)
                     logger.info("CWNGSync: queued book installed", installed.lpath)
                     if remaining > 1 then
-                        UIManager:nextTick(function()
+                        -- Not nextTick: as with deletions, each claim and
+                        -- download blocks, and a chain of tasks due at once
+                        -- holds the screen until the last book (#2329).
+                        UIManager:scheduleIn(0.5, function()
                             self:collectDeliveries(
                                 interactive, false, remaining - 1, collected + 1,
                                 true, collection_token)
