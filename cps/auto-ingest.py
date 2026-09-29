@@ -25,7 +25,7 @@ def load_dirs_config():
         'failed_folder': '/srv/calibre-ingest/failed',
         'retry_queue_file': '/srv/calibre-ingest/retry_queue.json',
         'max_retry_attempts': 3,
-        'retry_interval_seconds': 300
+        'retry_interval_seconds': 600
     }
     
     if not DIRS_JSON.exists():
@@ -56,7 +56,7 @@ def load_cwa_settings():
         'auto_convert_retained_formats': '',
         'ingest_timeout_minutes': 15,
         'ingest_stale_temp_minutes': 120,
-        'ingest_stale_interval': 300
+        'ingest_stale_temp_interval': 600
     }
     
     if not CWA_DB.exists():
@@ -89,7 +89,7 @@ def parse_format_list(formats_str):
 
 def get_processing_timeout(settings):
     """Get timeout for processing in seconds"""
-    timeout_min = int(settings.get('ingest_timeout_minutes', 30))
+    timeout_min = int(settings.get('ingest_timeout_minutes', 15))
     return timeout_min * 60  # Convert to seconds
 
 def cleanup_stale_temps(tmp_dir, stale_minutes, settings):
@@ -281,8 +281,8 @@ def watch_directory():
         
         # Get timeout settings
         timeout_sec = get_processing_timeout(settings)
-        stale_temp_min = int(settings.get('ingest_stale_temp_minutes', 60))
-        stale_interval = int(settings.get('ingest_stale_interval', 3600))
+        stale_temp_min = int(settings.get('ingest_stale_temp_minutes', 120))
+        stale_interval = int(settings.get('ingest_stale_temp_interval', 600))
         
         # Log settings every 10 scans
         if scan_iteration % 10 == 0:
