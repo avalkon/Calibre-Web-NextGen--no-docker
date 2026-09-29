@@ -14,6 +14,7 @@ import os
 # Configuration files
 DIRS_JSON = Path("/opt/calibre-web-nextgen/dirs.json")
 CWA_DB = Path("/opt/calibre-web-nextgen/cwa.db")
+META_STATUS_FILE = Path("/opt/calibre-web-nextgen/config/cwa_meta_status")
 WEB_UI_HOST = os.environ.get('CWA_PORT_OVERRIDE', 'localhost')
 WEB_UI_PORT = 8083  # Default port
 
@@ -73,6 +74,29 @@ def load_cwa_settings():
     except sqlite3.OperationalError as e:
         print(f"[SETTINGS] Error reading cwa.db: {e}")
         return default_settings
+
+def write_meta_status(state, detail=""):
+    """Write metadata detector status"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    status_line = f"{state}:{timestamp}:{detail}"
+    
+    try:
+        META_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(META_STATUS_FILE, 'w') as f:
+            f.write(status_line)
+    except IOError as e:
+        print(f"[META STATUS] Error writing status file: {e}")
+
+def clear_meta_status():
+    """Clear status file when idle"""
+    try:
+        if META_STATUS_FILE.exists():
+            META_STATUS_FILE.unlink()
+    except IOError:
+        pass
+
+# Usage in main loop:
+write_meta_status("active", "monitoring metadata.db")
 
 def get_metadata_db_path(calibre_library_dir):
     """Get path to metadata.db in Calibre library"""
