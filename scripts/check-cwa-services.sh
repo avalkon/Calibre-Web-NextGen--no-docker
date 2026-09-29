@@ -7,21 +7,21 @@ NC='\033[0m' # No Color
 echo "====== Calibre-Web Automated -- Status of Monitoring Services ======"
 echo ""
 
-# Check if cps.py is running (ingest service)
-if pgrep -f "cps\.py" > /dev/null; then
-    echo -e "- cps.py (ingest service) ${GREEN}is running${NC}"
+# Check if auto-ingest.py is running (ingest service)
+if /usr/bin/pgrep -f "auto-ingest\.py" > /dev/null; then
+    echo -e "- auto-ingest.py (ingest service) ${GREEN}is running${NC}"
     is=true
 else
-    echo -e "- cps.py (ingest service) ${RED}is not running${NC}"
+    echo -e "- auto-ingest.py (ingest service) ${RED}is not running${NC}"
     is=false
 fi
 
-# Check if auto-ingest.py is running (metadata change detector)
-if pgrep -f "auto-ingest\.py" > /dev/null; then
-    echo -e "- auto-ingest.py (metadata detector) ${GREEN}is running${NC}"
+# Check if metadata_change_dispatch.py is running (metadata change detector)
+if /usr/bin/pgrep -f "metadata_change_dispatch\.py" > /dev/null; then
+    echo -e "- metadata-change-detector (metadata enforcer) ${GREEN}is running${NC}"
     mc=true
 else
-    echo -e "- auto-ingest.py (metadata detector) ${RED}is not running${NC}"
+    echo -e "- metadata-change-detector (metadata enforcer) ${RED}is not running${NC}"
     mc=false
 fi
 
