@@ -1,5 +1,10 @@
 {
-    "ingest_folder":"/cwa-book-ingest",
-    "calibre_library_dir":"/calibre-library",
-    "tmp_conversion_dir":"/config/.cwa_conversion_tmp"
+    "ingest_folder": "/srv/calibre-ingest",
+    "calibre_library_dir": "/home/ava/Dusty Bookshelf",
+    "tmp_conversion_dir": "/config/.cwa_conversion_tmp",
+    "processed_folder": "/srv/calibre-ingest/processed",
+    "failed_folder": "/srv/calibre-ingest/failed",
+    "retry_queue_file": "/srv/calibre-ingest/retry_queue.json",
+    "max_retry_attempts": 3,
+    "retry_interval_seconds": 300
 }
