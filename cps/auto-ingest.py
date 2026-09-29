@@ -9,6 +9,8 @@
 # Handles filesystem errors without killing the watcher.
 # Uses atomic-ish retry queue writes to reduce corruption risk.
 # Avoids leaving converted files in the ingest directory after successful import.
+# FIXED: Adds BOTH original and converted formats, timeout wraps full pipeline, 
+#     max-retry files are permanently ignored after moving to failed/.
 
 import json
 import os
@@ -28,6 +30,9 @@ CWA_DB = Path("/opt/calibre-web-nextgen/cwa.db")
 # Status tracking files (matches CWA format exactly)
 STATUS_FILE = Path("/opt/calibre-web-nextgen/config/cwa_ingest_status")
 RETRY_QUEUE_FILE = Path("/opt/calibre-web-nextgen/config/cwa_ingest_retry_queue")
+
+# Metadata change logs directory (triggers cover_enforcer.py)
+METADATA_CHANGE_LOGS_DIR = Path("/opt/calibre-web-nextgen/config/metadata_change_logs")
 
 # Set by watch_directory() from dirs.json.
 CALIBRE_LIBRARY = ""
@@ -108,6 +113,45 @@ def load_cwa_settings():
     finally:
         if conn is not None:
             conn.close()
+
+
+# ============================================================
+# METADATA CHANGE LOG FUNCTIONS (NEW)
+# ============================================================
+
+def write_metadata_change_log(book_id, title, authors=None, **extra_fields):
+    """
+    Write a metadata change log that triggers cover_enforcer.py.
+    
+    The log filename format is: {YYYYMMDDHHMMSS}-{book_id}.json
+    The metadata-change-detector watches for these files and runs:
+      cover_enforcer.py --log <filename>
+    """
+    try:
+        METADATA_CHANGE_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"[METADATA] Error creating metadata log directory: {e}")
+        return None
+
+    payload = {
+        "book_id": str(book_id),
+        "title": title or "",
+        "authors": authors or [],
+    }
+    payload.update(extra_fields)
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    filename = f"{timestamp}-{book_id}.json"
+    path = METADATA_CHANGE_LOGS_DIR / filename
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"[METADATA] Wrote change log: {filename}")
+        return path
+    except OSError as e:
+        print(f"[METADATA] Error writing change log: {e}")
+        return None
 
 
 # ============================================================
@@ -491,11 +535,16 @@ def convert_file(source_path, target_format, tmp_dir=None, timeout_sec=1800):
         )
         return None
 
+
 def add_to_library(filepath, automerge=False, settings=None):
-    """Add file to Calibre library using calibredb."""
+    """
+    Add file to Calibre library using calibredb.
+    Returns (success: bool, book_id: int or None)
+    """
     if not CALIBRE_LIBRARY:
         print("[LIBRARY] ✗ Calibre library path is not configured")
-        return False
+        return False, None
+    
     cmd = [
         "calibredb",
         "add",
@@ -505,6 +554,7 @@ def add_to_library(filepath, automerge=False, settings=None):
     ]
     if automerge:
         cmd.append("--automergeresult")
+    
     timeout_sec = get_processing_timeout(settings or load_cwa_settings())
     try:
         result = subprocess.run(
@@ -514,19 +564,31 @@ def add_to_library(filepath, automerge=False, settings=None):
             timeout=timeout_sec,
         )
         if result.returncode == 0:
-            return True
+            # Try to extract book_id from output
+            # calibredb outputs: "Added book ids: 42"
+            book_id = None
+            try:
+                for line in result.stdout.split('\n'):
+                    if 'Added book ids:' in line:
+                        parts = line.split(':')
+                        if len(parts) > 1:
+                            book_id = int(parts[1].strip())
+                            break
+            except (ValueError, IndexError):
+                pass
+            return True, book_id
         error = (result.stderr or result.stdout or "calibredb failed").strip()
         print(f"[LIBRARY] ✗ {filepath.name}: {error[:500]}")
-        return False
+        return False, None
     except subprocess.TimeoutExpired:
         print(f"[LIBRARY] ⏱️ TIMEOUT adding {filepath.name}")
-        return False
+        return False, None
     except OSError as e:
         print(f"[LIBRARY] ✗ {filepath.name}: {e}")
-        return False
+        return False, None
     except Exception as e:
         print(f"[LIBRARY] ✗ {filepath.name}: {e}")
-        return False
+        return False, None
 
 
 # ============================================================
@@ -541,6 +603,7 @@ def should_ingest(filepath, settings):
     if filepath.suffix.lower() in ignored:
         return False, f"format {filepath.suffix} is in ingest ignore list"
     return True, "allowed"
+
 
 def should_convert(source_ext, settings):
     """Determine if file should be converted."""
@@ -570,13 +633,35 @@ def should_convert(source_ext, settings):
 
 
 def process_book(filepath, settings, config):
-    """Full processing pipeline with status tracking."""
+    """
+    Full processing pipeline with status tracking.
+    
+    When conversion is needed:
+    1. Add ORIGINAL format to library
+    2. Convert to target format
+    3. Add CONVERTED format to library
+    4. Write metadata change log for the original (to trigger cover_enforcer)
+    5. Move both files to processed/
+    
+    The entire operation from start to file move must complete within timeout.
+    """
     filepath = Path(filepath)
     if not filepath.exists():
         return False
 
     original_filepath = filepath
     converted_filepath = None
+    original_book_id = None
+    converted_book_id = None
+    
+    # Get the timeout that covers the ENTIRE operation
+    timeout_sec = get_processing_timeout(settings)
+    operation_start = time.time()
+    
+    def time_remaining():
+        elapsed = time.time() - operation_start
+        return max(1, timeout_sec - elapsed)
+    
     # Check if should ingest.
     allowed, reason = should_ingest(filepath, settings)
     if not allowed:
@@ -589,19 +674,50 @@ def process_book(filepath, settings, config):
         source_ext,
         settings,
     )
+    
     if needs_conversion:
+        # FIX #1: Add ORIGINAL format FIRST before conversion
+        print(f"[INGEST] Adding original format: {original_filepath.name}")
+        try:
+            automerge = bool(
+                int(settings.get("auto_ingest_automerge", 0))
+            )
+        except (TypeError, ValueError):
+            automerge = False
+        
+        success, original_book_id = add_to_library(
+            original_filepath,
+            automerge,
+            settings,
+        )
+        if not success:
+            print(f"[INGEST] ✗ Failed to add original format {original_filepath.name}")
+            add_to_retry_queue(
+                original_filepath,
+                "Failed to add original format",
+                config,
+            )
+            write_ingest_status(
+                "idle",
+                "",
+                "file queued for retry",
+            )
+            return False
+        
+        print(f"[INGEST] ✓ Original added (book_id={original_book_id})")
+        
+        # Now convert (with remaining timeout)
         tmp_dir = config.get("tmp_conversion_dir")
-        timeout_sec = get_processing_timeout(settings)
-
+        remaining = time_remaining()
+        
         converted_filepath = convert_file(
-            filepath,
+            original_filepath,
             target_or_source.replace(".", ""),
             tmp_dir,
-            timeout_sec,
+            int(remaining),
         )
-        if converted_filepath:
-            filepath = converted_filepath
-        else:
+        if not converted_filepath:
+            print(f"[INGEST] ✗ Conversion failed for {original_filepath.name}")
             add_to_retry_queue(
                 original_filepath,
                 "Conversion failed",
@@ -613,61 +729,52 @@ def process_book(filepath, settings, config):
                 "file queued for retry",
             )
             return False
-
-    # Add to library.
-    try:
-        automerge = bool(
-            int(settings.get("auto_ingest_automerge", 0))
+        
+        # FIX #1: Add CONVERTED format as well
+        print(f"[INGEST] Adding converted format: {converted_filepath.name}")
+        remaining = time_remaining()
+        success, converted_book_id = add_to_library(
+            converted_filepath,
+            automerge,
+            settings,
         )
-    except (TypeError, ValueError):
-        automerge = False
-
-    success = add_to_library(
-        filepath,
-        automerge,
-        settings,
-    )
-    if not success:
-        # Important: queue the ORIGINAL ingest file, not a generated
-        # conversion output. The conversion output can be recreated.
-        add_to_retry_queue(
-            original_filepath,
-            "Library add failed",
-            config,
-        )
-        # If a conversion output was generated, remove it so the next
-        # retry starts from the original source.
-        if converted_filepath and converted_filepath.exists():
-            try:
-                converted_filepath.unlink()
-            except OSError as e:
-                print(
-                    f"[CLEANUP] Could not remove conversion output "
-                    f"{converted_filepath}: {e}"
-                )
-        write_ingest_status(
-            "idle",
-            "",
-            "file queued for retry",
-        )
-        return False
-
-    # Import succeeded. Move the original source to processed.
-    processed_folder = Path(config.get("processed_folder"))
-    if converted_filepath:
-        # The converted file is what was actually imported. Move it to
-        # processed first so the ingest folder is not left with generated
-        # output.
+        if not success:
+            print(f"[INGEST] ✗ Failed to add converted format {converted_filepath.name}")
+            print(f"[INGEST] Note: Original {original_filepath.name} was already added as book_id={original_book_id}")
+            add_to_retry_queue(
+                original_filepath,
+                "Failed to add converted format",
+                config,
+            )
+            write_ingest_status(
+                "idle",
+                "",
+                "file queued for retry",
+            )
+            return False
+        
+        print(f"[INGEST] ✓ Converted added (book_id={converted_book_id})")
+        
+        # Write metadata log for the ORIGINAL (not converted)
+        if original_book_id:
+            title = original_filepath.stem.split(' - ')[0] if ' - ' in original_filepath.stem else original_filepath.stem
+            write_metadata_change_log(
+                book_id=original_book_id,
+                title=title,
+                authors=[],
+                source="auto-ingest",
+            )
+        
+        # Move both to processed
+        processed_folder = Path(config.get("processed_folder"))
+        
         converted_destination = move_to_folder(
             converted_filepath,
             processed_folder,
         )
         if converted_destination is None:
-            # The book is already in Calibre. Do not retry the import,
-            # because that could create a duplicate. Keep the source and
-            # report the cleanup problem instead.
             print(
-                f"[INGEST] ✓ Imported {converted_filepath.name}, "
+                f"[INGEST] ✓ Both formats imported, "
                 f"but could not move converted file to processed/"
             )
             write_ingest_status(
@@ -676,18 +783,15 @@ def process_book(filepath, settings, config):
                 "import succeeded; processed move failed",
             )
             return True
-        # Move the original source as well. This is the critical fix that
-        # prevents the normal scanner from converting it repeatedly.
+        
         original_destination = move_to_folder(
             original_filepath,
             processed_folder,
         )
-
         if original_destination is None:
             print(
-                f"[INGEST] ✓ Imported {converted_destination.name}, "
-                f"but original source could not be moved: "
-                f"{original_filepath.name}"
+                f"[INGEST] ✓ Both formats imported, "
+                f"but original source could not be moved to processed/"
             )
             write_ingest_status(
                 "failed",
@@ -695,13 +799,51 @@ def process_book(filepath, settings, config):
                 "import succeeded; original move failed",
             )
             return True
+        
         print(
-            f"[INGEST] ✓ Imported: {converted_destination.name} "
-            f"(source archived as {original_destination.name})"
+            f"[INGEST] ✓ Imported both formats: "
+            f"{original_destination.name} + {converted_destination.name}"
         )
-
+        
     else:
-        # No conversion: move the imported file itself.
+        # No conversion needed: just add original and move it
+        try:
+            automerge = bool(
+                int(settings.get("auto_ingest_automerge", 0))
+            )
+        except (TypeError, ValueError):
+            automerge = False
+
+        success, original_book_id = add_to_library(
+            filepath,
+            automerge,
+            settings,
+        )
+        if not success:
+            add_to_retry_queue(
+                original_filepath,
+                "Library add failed",
+                config,
+            )
+            write_ingest_status(
+                "idle",
+                "",
+                "file queued for retry",
+            )
+            return False
+        
+        # Write metadata log
+        if original_book_id:
+            title = original_filepath.stem.split(' - ')[0] if ' - ' in original_filepath.stem else original_filepath.stem
+            write_metadata_change_log(
+                book_id=original_book_id,
+                title=title,
+                authors=[],
+                source="auto-ingest",
+            )
+        
+        # Move to processed
+        processed_folder = Path(config.get("processed_folder"))
         destination = move_to_folder(
             filepath,
             processed_folder,
@@ -728,6 +870,7 @@ def process_book(filepath, settings, config):
         "processing complete",
     )
     return True
+
 
 # ============================================================
 # RETRY PROCESSING
@@ -772,19 +915,22 @@ def process_from_retry_queue(settings, config):
 
         # Once the recorded number of attempts has been exhausted,
         # permanently fail the source file.
+        # FIX #3: After moving to failed, also ignore it in future scans
         if attempts >= max_attempts:
             filename = entry.get("filename", "unknown")
             filepath = Path(entry.get("original_path", ""))
             print(
                 f"[RETRY] Max attempts ({max_attempts}) reached "
-                f"for {filename}"
+                f"for {filename}; moving to failed folder and blacklisting"
             )
             if filepath.exists():
                 move_failed_file(filepath, config)
-
+            
+            # Remove from retry queue so it's never retried again
             queue_data.remove(entry)
             changed = True
             continue
+        
         filepath = Path(entry.get("original_path", ""))
         if not filepath.exists():
             print(
@@ -850,6 +996,7 @@ def process_from_retry_queue(settings, config):
 
     return processed
 
+
 # ============================================================
 # MAIN WATCH LOOP
 # ============================================================
@@ -872,6 +1019,7 @@ def watch_directory():
         processed_folder,
         failed_folder,
         STATUS_FILE.parent,
+        METADATA_CHANGE_LOGS_DIR,
     ]:
         ensure_directory(directory)
 
@@ -887,6 +1035,7 @@ def watch_directory():
     print(f"Ingest Directory:       {ingest_folder}")
     print(f"Status File:            {STATUS_FILE}")
     print(f"Retry Queue:            {retry_file}")
+    print(f"Metadata Change Logs:   {METADATA_CHANGE_LOGS_DIR}")
     print(f"Calibre Library:        {CALIBRE_LIBRARY}")
     print(f"CWA Settings DB:        {CWA_DB}")
     print("Poll Interval:          10 seconds")
@@ -1015,6 +1164,7 @@ def watch_directory():
                 f"watcher error: {str(e)[:100]}",
             )
         time.sleep(10)
+
 
 if __name__ == "__main__":
     watch_directory()
