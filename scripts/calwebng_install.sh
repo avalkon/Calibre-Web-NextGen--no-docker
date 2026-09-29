@@ -136,8 +136,8 @@ Requires=calibre-web-nextgen.service
 Type=simple
 User=acw
 Group=acw
-WorkingDirectory=/opt/calibre-web-nextgen
-Environment="PATH=/opt/calibre-web-nextgen/venv/bin"
+WorkingDirectory=${INSTALL_DIR}
+Environment="PATH=${INSTALL_DIR}/venv/bin:${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/opt/calibre-web-nextgen/venv/bin/python /opt/calibre-web-nextgen/cps/auto-ingest.py
 Restart=always
 RestartSec=15
@@ -157,11 +157,11 @@ Requires=calibre-web-nextgen.service
 Type=simple
 User=acw
 Group=acw
-WorkingDirectory=/opt/calibre-web-nextgen
-Environment="PATH=/opt/calibre-web-nextgen/venv/bin"
-Environment="CWA_METADATA_CHANGE_LOGS_DIR=/opt/calibre-web-nextgen/config/metadata_change_logs"
-Environment="CWA_METADATA_TEMP_DIR=/opt/calibre-web-nextgen/config/metadata_temp"
-ExecStart=/bin/bash /opt/calibre-web-nextgen/scripts/metadata-detector.sh
+WorkingDirectory=${INSTALL_DIR}
+Environment="PATH=${INSTALL_DIR}/venv/bin:${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
+Environment="CWA_METADATA_CHANGE_LOGS_DIR=${INSTALL_DIR}/config/metadata_change_logs"
+Environment="CWA_METADATA_TEMP_DIR=${INSTALL_DIR}/config/metadata_temp"
+ExecStart=/bin/bash ${INSTALL_DIR}/scripts/metadata-detector.sh
 Restart=always
 RestartSec=15
 
