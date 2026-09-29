@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # /srv/calibre-ingest/watched_ingest.py
 # CWA-Compatible Ingest Watcher with Full Status File Support
-#
-# Corrected drop-in version:
-# - Prevents files in the retry queue from being processed by the normal scanner.
-# - Moves successful source/conversion files to processed/.
-# - Moves permanently failed files to failed/.
-# - Honors retry_queue_file from dirs.json.
-# - Creates the configured temporary conversion directory.
-# - Handles filesystem errors without killing the watcher.
-# - Uses atomic-ish retry queue writes to reduce corruption risk.
-# - Avoids leaving converted files in the ingest directory after successful import.
+# Prevents files in the retry queue from being processed by the normal scanner.
+# Moves successful source/conversion files to processed/.
+# Moves permanently failed files to failed/.
+# Honors retry_queue_file from dirs.json.
+# Creates the configured temporary conversion directory.
+# Handles filesystem errors without killing the watcher.
+# Uses atomic-ish retry queue writes to reduce corruption risk.
+# Avoids leaving converted files in the ingest directory after successful import.
 
 import json
 import os
