@@ -102,9 +102,9 @@ echo -e "${GREEN}[INSTALL]${NC} Config directory created at $CONFIG_DIR"
 echo ""
 
 #######################################
-# Step 5: Create Systemd Service File
+# Step 5: Create Systemd Service Files
 #######################################
-echo -e "${YELLOW}[STEP 7]${NC} Creating systemd service file..."
+echo -e "${YELLOW}[STEP 7]${NC} Creating systemd service files..."
 cat > /etc/systemd/system/calibre-web-nextgen.service << EOF
 [Unit]
 Description=Calibre-Web NextGen
@@ -126,9 +126,54 @@ UMask=022
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/calibre-web-ingest.service << EOF
+[Unit]
+Description=Calibre-Web NextGen Ingest Service
+After=calibre-web-nextgen.service
+Requires=calibre-web-nextgen.service
+
+[Service]
+Type=simple
+User=acw
+Group=acw
+WorkingDirectory=/opt/calibre-web-nextgen
+Environment="PATH=/opt/calibre-web-nextgen/venv/bin"
+ExecStart=/opt/calibre-web-nextgen/venv/bin/python /opt/calibre-web-nextgen/cps/auto-ingest.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/calibre-web-meta.service << EOF
+[Unit]
+Description=Calibre-Web NextGen Metadata Change Detector
+After=calibre-web-nextgen.service
+Requires=calibre-web-nextgen.service
+
+[Service]
+Type=simple
+User=acw
+Group=acw
+WorkingDirectory=/opt/calibre-web-nextgen
+Environment="PATH=/opt/calibre-web-nextgen/venv/bin"
+Environment="CWA_METADATA_CHANGE_LOGS_DIR=/opt/calibre-web-nextgen/config/metadata_change_logs"
+Environment="CWA_METADATA_TEMP_DIR=/opt/calibre-web-nextgen/config/metadata_temp"
+ExecStart=/bin/bash /opt/calibre-web-nextgen/scripts/metadata-detector.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 echo "--- Service file contents ---"
 cat /etc/systemd/system/calibre-web-nextgen.service
-echo -e "${GREEN}[INSTALL]${NC} Systemd service file created."
+cat /etc/systemd/system/calibre-web-ingest.service
+cat /etc/systemd/system/calibre-web-meta.service
+echo -e "${GREEN}[INSTALL]${NC} Systemd service files created."
 echo ""
 
 #######################################
