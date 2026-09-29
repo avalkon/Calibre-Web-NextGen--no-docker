@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # /srv/calibre-ingest/watched_ingest.py
-# CWA-Compatible Ingest Watcher with timeout and stale temp cleanup
+# CWA-Compatible Ingest Watcher with Full Status File Support
 
 import os
 import subprocess
 import sqlite3
 import json
 import signal
+import sys
 from pathlib import Path
 import time
 from datetime import datetime, timedelta
@@ -15,17 +16,21 @@ from datetime import datetime, timedelta
 DIRS_JSON = Path("/opt/calibre-web-nextgen/dirs.json")
 CWA_DB = Path("/opt/calibre-web-nextgen/cwa.db")
 
+# Status tracking files (matches CWA format exactly)
+STATUS_FILE = Path("/opt/calibre-web-nextgen/config/cwa_ingest_status")
+RETRY_QUEUE_FILE = Path("/opt/calibre-web-nextgen/config/cwa_ingest_retry_queue")
+
 def load_dirs_config():
     """Load paths from CWA's dirs.json"""
     default_config = {
         'ingest_folder': '/srv/calibre-ingest',
-        'calibre_library_dir': '/calibre-library',
+        'calibre_library_dir': '/home/ava/Dusty Bookshelf',
         'tmp_conversion_dir': '/tmp/cwa_conversions',
         'processed_folder': '/srv/calibre-ingest/processed',
         'failed_folder': '/srv/calibre-ingest/failed',
-        'retry_queue_file': '/srv/calibre-ingest/retry_queue.json',
+        'retry_queue_file': str(RETRY_QUEUE_FILE),
         'max_retry_attempts': 3,
-        'retry_interval_seconds': 600
+        'retry_interval_seconds': 300
     }
     
     if not DIRS_JSON.exists():
@@ -70,6 +75,7 @@ def load_cwa_settings():
         
         if row:
             columns = [desc[0] for desc in cursor.description]
+            conn.close()
             return dict(zip(columns, row))
         else:
             conn.close()
@@ -78,6 +84,73 @@ def load_cwa_settings():
     except sqlite3.OperationalError as e:
         print(f"[SETTINGS] Error reading cwa.db: {e}")
         return default_settings
+
+# ============================================================
+# STATUS FILE FUNCTIONS (CWA Compatible Format)
+# ============================================================
+
+def write_ingest_status(state, filename="", detail=""):
+    """
+    Write status file in CWA format: state:filename:timestamp:detail
+    
+    Possible states: idle, processing, failed, stopped
+    Format: state:filename:YYYY-MM-DD HH:MM:SS:detail
+    """
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    status_line = f"{state}:{filename}:{timestamp}:{detail}"
+    
+    try:
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATUS_FILE, 'w') as f:
+            f.write(status_line)
+        print(f"[STATUS] {state.upper()}: {filename or 'idle'}")
+    except IOError as e:
+        print(f"[STATUS] Error writing status file: {e}")
+
+def clear_ingest_status():
+    """Clear status file when idle (optional - can also write idle state)"""
+    try:
+        if STATUS_FILE.exists():
+            STATUS_FILE.unlink()
+    except IOError:
+        pass
+
+def load_retry_queue():
+    """Load retry queue from JSON file"""
+    if not RETRY_QUEUE_FILE.exists():
+        return []
+    
+    try:
+        with open(RETRY_QUEUE_FILE, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+def save_retry_queue(queue_data):
+    """Save retry queue to JSON file"""
+    try:
+        RETRY_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(RETRY_QUEUE_FILE, 'w') as f:
+            json.dump(queue_data, f, indent=2)
+    except IOError as e:
+        print(f"[RETRY] Error saving queue: {e}")
+
+# ============================================================
+# SHUTDOWN HANDLER
+# ============================================================
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    print("\n[SHUTDOWN] Received termination signal...")
+    write_ingest_status("stopped", "", "shutdown requested")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# ============================================================
+# PARSING & VALIDATION FUNCTIONS
+# ============================================================
 
 def parse_format_list(formats_str):
     """Parse comma-separated format list"""
@@ -90,7 +163,11 @@ def parse_format_list(formats_str):
 def get_processing_timeout(settings):
     """Get timeout for processing in seconds"""
     timeout_min = int(settings.get('ingest_timeout_minutes', 15))
-    return timeout_min * 60  # Convert to seconds
+    return timeout_min * 60
+
+# ============================================================
+# CLEANUP FUNCTIONS
+# ============================================================
 
 def cleanup_stale_temps(tmp_dir, stale_minutes, settings):
     """Remove temp files older than threshold"""
@@ -115,6 +192,10 @@ def cleanup_stale_temps(tmp_dir, stale_minutes, settings):
     
     return cleaned
 
+# ============================================================
+# CONVERSION & LIBRARY FUNCTIONS
+# ============================================================
+
 def convert_file(source_path, target_format, tmp_dir=None, timeout_sec=1800):
     """Convert using ebook-convert with timeout"""
     output_path = source_path.with_suffix(f'.{target_format}')
@@ -128,147 +209,214 @@ def convert_file(source_path, target_format, tmp_dir=None, timeout_sec=1800):
     cmd = ['ebook-convert', str(source_path), str(output_path)]
     
     try:
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            env=env,
-            timeout=timeout_sec  # Apply timeout
-        )
+        write_ingest_status("processing", source_path.name, "conversion started")
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout_sec)
         
         if result.returncode == 0:
-            print(f"[CONVERT] ✓ {source_path.name} → {output_path.name} ({result.stderr.count('\\n')} lines)")
+            print(f"[CONVERT] ✓ {source_path.name} → {output_path.name}")
+            write_ingest_status("processing", source_path.name, "conversion complete")
             return output_path
         else:
             print(f"[CONVERT] ✗ {source_path.name}: {result.stderr[:500]}")
+            write_ingest_status("failed", source_path.name, f"conversion error: {result.stderr[:100]}")
             return None
             
     except subprocess.TimeoutExpired:
         print(f"[CONVERT] ⏱️ TIMEOUT after {timeout_sec}s for {source_path.name}")
+        write_ingest_status("failed", source_path.name, "conversion timeout")
         return None
     except Exception as e:
         print(f"[CONVERT] ✗ {source_path.name}: {e}")
+        write_ingest_status("failed", source_path.name, str(e)[:100])
         return None
 
-def add_to_retry_queue(queue_path, max_retries, filepath, error_msg):
-    """Add file to retry queue"""
-    if queue_path.exists():
-        try:
-            with open(queue_path, 'r') as f:
-                queue_data = json.load(f)
-        except:
-            queue_data = []
-    else:
-        queue_data = []
+def add_to_library(filepath, automerge=False):
+    """Add file to Calibre library using calibredb"""
+    cmd = ['calibredb', 'add', '--library-path', CALIBRE_LIBRARY, str(filepath)]
     
-    # Remove existing entry for this file
+    if automerge:
+        cmd.append('--automergeresult')
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=get_processing_timeout(load_cwa_settings()))
+        
+        if result.returncode == 0:
+            return True
+        else:
+            print(f"[LIBRARY] ✗ {filepath.name}: {result.stderr[:500]}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print(f"[LIBRARY] ⏱️ TIMEOUT adding {filepath.name}")
+        return False
+    except Exception as e:
+        print(f"[LIBRARY] ✗ {filepath.name}: {e}")
+        return False
+
+def add_to_retry_queue(filepath, error_msg, config):
+    """Add file to retry queue"""
+    queue_data = load_retry_queue()
+    
+    # Remove any existing entry for this file
     queue_data = [e for e in queue_data if e.get('filename') != filepath.name]
     
     retry_entry = {
         'filename': filepath.name,
         'original_path': str(filepath),
         'attempts': 1,
-        'max_attempts': max_retries,
+        'max_attempts': int(config.get('max_retry_attempts', 3)),
         'last_attempt': datetime.now().isoformat(),
         'error': str(error_msg)[:500]
     }
     
     queue_data.append(retry_entry)
-    
-    with open(queue_path, 'w') as f:
-        json.dump(queue_data, f, indent=2)
+    save_retry_queue(queue_data)
+    print(f"[RETRY] Added to queue: {filepath.name} (attempt 1/{retry_entry['max_attempts']})")
 
-def process_book(filepath, settings, config):
-    """Full processing pipeline with timeout"""
-    # Get timeout from settings
-    timeout_sec = get_processing_timeout(settings)
-    
-    # Check if should ingest (filter ignored formats)
+# ============================================================
+# BOOK PROCESSING PIPELINE
+# ============================================================
+
+def should_ingest(filepath, settings):
+    """Check if file should be ingested (filter ignored formats)"""
     ignored = parse_format_list(settings.get('auto_ingest_ignored_formats', ''))
     if filepath.suffix.lower() in ignored:
-        print(f"[INGEST] Skip {filepath.name}: in ignore list")
+        return False, f"format {filepath.suffix} is in ingest ignore list"
+    return True, "allowed"
+
+def should_convert(source_ext, settings):
+    """Determine if file should be converted"""
+    if not int(settings.get('auto_convert', 1)):
+        return False, None, "auto_convert disabled"
+    
+    target_format = settings.get('auto_convert_target_format', 'epub').lower().replace('.', '')
+    target_ext = f'.{target_format}'
+    
+    retained = parse_format_list(settings.get('auto_convert_retained_formats', ''))
+    ignored_conv = parse_format_list(settings.get('auto_convert_ignored_formats', ''))
+    
+    if source_ext in retained:
+        return False, source_ext, "format is retained"
+    if source_ext in ignored_conv:
+        return False, source_ext, "format is ignored for conversion"
+    if source_ext == target_ext:
+        return False, source_ext, "already target format"
+    
+    return True, target_ext, "convert needed"
+
+def process_book(filepath, settings, config):
+    """Full processing pipeline with status tracking"""
+    # Check if should ingest
+    allowed, reason = should_ingest(filepath, settings)
+    if not allowed:
+        print(f"[INGEST] Skip {filepath.name}: {reason}")
         return False
     
     source_ext = filepath.suffix.lower()
     
     # Check if should convert
-    if int(settings.get('auto_convert', 1)):
-        target_format = settings.get('auto_convert_target_format', 'epub').lower().replace('.', '')
-        target_ext = f'.{target_format}'
-        
-        retained = parse_format_list(settings.get('auto_convert_retained_formats', ''))
-        ignored_conv = parse_format_list(settings.get('auto_convert_ignored_formats', ''))
-        
-        if source_ext in retained or source_ext in ignored_conv or source_ext == target_ext:
-            pass  # No conversion needed
-        else:
-            tmp_dir = config.get('tmp_conversion_dir')
-            converted = convert_file(filepath, target_format, tmp_dir, timeout_sec)
-            if converted:
-                filepath = converted
-            else:
-                # Add to retry queue if conversion fails
-                add_to_retry_queue(
-                    Path(config.get('retry_queue_file')),
-                    int(config.get('max_retry_attempts', 3)),
-                    filepath,
-                    "Conversion failed"
-                )
-                return False
+    needs_conversion, target_or_source, reason = should_convert(source_ext, settings)
     
-    # Add to library (also with timeout)
-    automerge = bool(int(settings.get('auto_ingest_automerge', 0)))
-    cmd = ['calibredb', 'add', '--library-path', config.get('calibre_library_dir'), str(filepath)]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+    if needs_conversion:
+        tmp_dir = config.get('tmp_conversion_dir')
+        timeout_sec = get_processing_timeout(settings)
+        converted = convert_file(filepath, target_or_source.replace('.', ''), tmp_dir, timeout_sec)
         
-        if result.returncode == 0:
-            processed_folder = Path(config.get('processed_folder'))
-            dest = processed_folder / filepath.name
-            filepath.rename(dest)
-            print(f"[INGEST] ✓ Imported: {dest.name}")
-            return True
+        if converted:
+            filepath = converted
+            source_ext = converted.suffix.lower()
         else:
-            print(f"[LIBRARY] ✗ {filepath.name}: {result.stderr[:500]}")
-            add_to_retry_queue(
-                Path(config.get('retry_queue_file')),
-                int(config.get('max_retry_attempts', 3)),
-                filepath,
-                "Library add failed"
-            )
+            # Failed conversion - add to retry queue
+            add_to_retry_queue(filepath, "Conversion failed", config)
+            write_ingest_status("idle", "", "file queued for retry")
             return False
-            
-    except subprocess.TimeoutExpired:
-        print(f"[LIBRARY] ⏱️ TIMEOUT adding {filepath.name}")
-        add_to_retry_queue(
-            Path(config.get('retry_queue_file')),
-            int(config.get('max_retry_attempts', 3)),
-            filepath,
-            "Library add timeout"
-        )
+    
+    # Add to library
+    automerge = bool(int(settings.get('auto_ingest_automerge', 0)))
+    success = add_to_library(filepath, automerge)
+    
+    if success:
+        processed_folder = Path(config.get('processed_folder'))
+        dest = processed_folder / filepath.name
+        filepath.rename(dest)
+        print(f"[INGEST] ✓ Imported: {dest.name}")
+        write_ingest_status("idle", "", "processing complete")
+        return True
+    else:
+        # Failed - add to retry queue
+        add_to_retry_queue(filepath, "Library add failed", config)
+        write_ingest_status("idle", "", "file queued for retry")
         return False
 
+def process_from_retry_queue(settings, config):
+    """Process files from retry queue that are ready"""
+    max_interval = int(config.get('retry_interval_seconds', 300))
+    queue_data = load_retry_queue()
+    processed = []
+    
+    for entry in queue_data[:]:
+        # Check if enough time has passed
+        last_attempt = datetime.fromisoformat(entry['last_attempt'])
+        if datetime.now() - last_attempt < timedelta(seconds=max_interval):
+            continue
+        
+        # Check if we've exceeded max attempts
+        if entry['attempts'] >= entry['max_attempts']:
+            print(f"[RETRY] Max attempts ({entry['max_attempts']}) reached for {entry['filename']}")
+            queue_data.remove(entry)
+            continue
+        
+        # Attempt retry
+        filepath = Path(entry['original_path'])
+        if not filepath.exists():
+            print(f"[RETRY] File no longer exists: {entry['filename']}")
+            queue_data.remove(entry)
+            continue
+        
+        print(f"[RETRY] Attempt {entry['attempts'] + 1}/{entry['max_attempts']} for {entry['filename']}")
+        write_ingest_status("processing", entry['filename'], "retry started")
+        
+        if process_book(filepath, settings, config):
+            queue_data.remove(entry)
+            processed.append(entry['filename'])
+        else:
+            entry['attempts'] += 1
+            entry['last_attempt'] = datetime.now().isoformat()
+    
+    save_retry_queue(queue_data)
+    return processed
+
+# ============================================================
+# MAIN WATCH LOOP
+# ============================================================
+
 def watch_directory():
-    """Main polling loop with stale temp cleanup"""
+    """Main polling loop with status file updates"""
     global CALIBRE_LIBRARY
     
+    # Load paths from dirs.json at startup
     config = load_dirs_config()
     INGEST_FOLDER = Path(config.get('ingest_folder'))
     CALIBRE_LIBRARY = config.get('calibre_library_dir')
     
-    for directory in [INGEST_FOLDER, config.get('processed_folder'), config.get('failed_folder')]:
+    # Create all necessary directories
+    for directory in [INGEST_FOLDER, config.get('processed_folder'), config.get('failed_folder'), STATUS_FILE.parent]:
         Path(directory).mkdir(parents=True, exist_ok=True)
     
     print("=" * 60)
     print("[WATCHER] Calibre-Web NextGen CWA-Compatible Ingest Watcher")
     print("=" * 60)
-    print(f"Ingest:               {INGEST_FOLDER}")
-    print(f"Temp Directory:       {config.get('tmp_conversion_dir')}")
-    print(f"Processed:            {config.get('processed_folder')}")
-    print(f"Failed:               {config.get('failed_folder')}")
-    print(f"CWA Settings:         {CWA_DB}")
+    print(f"Ingest Directory:       {INGEST_FOLDER}")
+    print(f"Status File:            {STATUS_FILE}")
+    print(f"Retry Queue:            {RETRY_QUEUE_FILE}")
+    print(f"Calibre Library:        {CALIBRE_LIBRARY}")
+    print(f"CWA Settings DB:        {CWA_DB}")
+    print(f"Poll Interval:          10 seconds")
     print("=" * 60)
+    print("")
+    
+    # Initialize status file - show we're running/idle
+    write_ingest_status("idle", "", "watcher active")
     
     scan_iteration = 0
     last_cleanup = datetime.now()
@@ -276,7 +424,7 @@ def watch_directory():
     while True:
         scan_iteration += 1
         
-        # Reload settings each scan
+        # Reload settings each scan (reflects admin panel changes in real-time!)
         settings = load_cwa_settings()
         
         # Get timeout settings
@@ -288,9 +436,9 @@ def watch_directory():
         if scan_iteration % 10 == 0:
             print(f"[SETTINGS] auto_convert={settings.get('auto_convert', '?')}, "
                   f"target_format={settings.get('auto_convert_target_format', '?')}, "
-                  f"timeout={timeout_sec // 60}min, stale_check={stale_interval // 60}min")
+                  f"timeout={timeout_sec // 60}min")
             
-            # Stale temp cleanup (run at configured interval)
+            # Stale temp cleanup
             if (datetime.now() - last_cleanup).total_seconds() >= stale_interval:
                 tmp_dir = config.get('tmp_conversion_dir')
                 cleaned = cleanup_stale_temps(tmp_dir, stale_temp_min, settings)
@@ -298,18 +446,33 @@ def watch_directory():
                     print(f"[CLEANUP] Removed {cleaned} stale temp file(s)")
                 last_cleanup = datetime.now()
         
-        # Process new files
+        # Process new files in ingest folder
         files = [f for f in INGEST_FOLDER.iterdir() 
                  if f.is_file() and not f.name.startswith('.')]
         
         processed_count = 0
         for filepath in files:
-            print(f"[SCAN] {filepath.name}...")
+            print(f"[SCAN] Processing {filepath.name}...")
             if process_book(filepath, settings, config):
                 processed_count += 1
         
-        print(f"[WATCHER] Scan #{scan_iteration}: {processed_count} file(s) processed | Timeout: {timeout_sec // 60}min")
+        # Process retry queue (every 5 scans to avoid overwhelming)
+        if scan_iteration % 5 == 0:
+            queue = load_retry_queue()
+            if queue:
+                retried = process_from_retry_queue(settings, config)
+                if retried:
+                    print(f"[RETRY] Successfully re-processed: {retried}")
+                queue_after = load_retry_queue()
+                if len(queue_after) < len(queue):
+                    write_ingest_status("idle", "", f"retry queue: {len(queue_after)} remaining")
         
+        status = f"Scan #{scan_iteration}: {processed_count} new file(s)"
+        queue = load_retry_queue()
+        if queue:
+            status += f" | {len(queue)} in retry queue"
+        
+        print(f"[WATCHER] {status}")
         time.sleep(10)
 
 if __name__ == "__main__":
