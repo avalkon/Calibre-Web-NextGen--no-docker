@@ -1,251 +1,727 @@
-#!/usr/bin/env python3
-# /opt/calibre-web-nextgen/scripts/meta_detector.py
-# Metadata Change Detector with Full Status File Support
+# -*- coding: utf-8 -*-
+# Calibre-Web Automated – fork of Calibre-Web
+# Copyright (C) 2018-2025 Calibre-Web contributors
+# Copyright (C) 2024-2025 Calibre-Web Automated contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+# See CONTRIBUTORS for full list of authors.
 
-import sqlite3
-import hashlib
 import json
-from pathlib import Path
-import time
-import signal
-import sys
-from datetime import datetime
-import os
+import re
+import unicodedata
+import math
+from datetime import date, datetime
+from difflib import SequenceMatcher
 
-# Configuration files
-DIRS_JSON = Path("/opt/calibre-web-nextgen/dirs.json")
-CWA_DB = Path("/opt/calibre-web-nextgen/cwa.db")
+from cps import logger, db
+from cps.metadata_constants import (
+    DEFAULT_METADATA_PROVIDER_HIERARCHY,
+    DEFAULT_METADATA_PROVIDER_HIERARCHY_JSON,
+    metadata_provider_enabled,
+)
+from cps.search_metadata import cl as metadata_providers
+from cps.cwa_db_loader import load_cwa_db
+CWA_DB = load_cwa_db().CWA_DB
 
-# Status tracking files (matches CWA format)
-META_STATUS_FILE = Path("/opt/calibre-web-nextgen/config/cwa_meta_status")
+log = logger.create()
 
-def load_dirs_config():
-    """Load paths from dirs.json"""
-    default_config = {
-        'calibre_library_dir': '/home/ava/Dusty Bookshelf',
-        'checkpoint_file': '/opt/calibre-web-nextgen/.meta_checkpoint'
-    }
+def fetch_and_apply_metadata(book_id: int, user_enabled: bool = False) -> bool:
+    """
+    Fetch metadata for a newly ingested book and apply it if settings allow.
     
-    if not DIRS_JSON.exists():
-        return default_config
-    
+    Args:
+        book_id: The ID of the book to fetch metadata for
+        user_enabled: Deprecated parameter - metadata fetching is now admin-controlled only
+        
+    Returns:
+        bool: True if metadata was successfully fetched and applied, False otherwise
+    """
     try:
-        with open(DIRS_JSON, 'r') as f:
-            config = json.load(f)
+        if not db.CalibreDB.session_factory:
+            log.error("CalibreDB not initialized; skipping metadata fetch")
+            return False
+
+        # Check global settings (admin-controlled only)
+        cwa_db = CWA_DB()
+        cwa_settings = cwa_db.get_cwa_settings()
         
-        for key in config:
-            val = config[key].strip() if isinstance(config[key], str) else config[key]
-            if isinstance(val, str) and val.startswith("'") and val.endswith("'"):
-                config[key] = val[1:-1]
+        if not cwa_settings.get('auto_metadata_fetch_enabled', False):
+            log.debug("Auto metadata fetch disabled by administrator")
+            return False
+            
+        # Get the book
+        calibre_db_instance = db.CalibreDB(expire_on_commit=False, init=True)
+        book = calibre_db_instance.get_book(book_id)
+        if not book:
+            log.error(f"Book with ID {book_id} not found")
+            return False
+            
+        # Create search query from book title and author
+        search_query = book.title
+        if book.authors:
+            author_names = [author.name for author in book.authors]
+            search_query += " " + " ".join(author_names)
+
+        # The book's existing ISBN is used to pick the matching edition from the
+        # provider's results instead of blindly taking the first one (fork #402).
+        book_isbn = _book_isbn(book)
+
+        log.info(f"Fetching metadata for: {search_query}")
+
+        # Get provider hierarchy (single source of truth — fork #405)
+        try:
+            provider_hierarchy = json.loads(cwa_settings.get('metadata_provider_hierarchy', DEFAULT_METADATA_PROVIDER_HIERARCHY_JSON))
+            if not isinstance(provider_hierarchy, list):
+                raise ValueError("metadata_provider_hierarchy must be a list")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            provider_hierarchy = list(DEFAULT_METADATA_PROVIDER_HIERARCHY)
+
+        # Global provider enablement map
+        enabled_map = _parse_metadata_providers_enabled(
+            cwa_settings.get('metadata_providers_enabled', '{}')
+        )
+            
+        # Try each provider in order
+        metadata_found = False
+        providers_by_id = {getattr(p, '__id__', None): p for p in metadata_providers}
+        for provider_id in provider_hierarchy:
+            if not isinstance(provider_id, str) or not provider_id.strip():
+                continue
+            provider_id = provider_id.strip()
+            # Check if explicitly disabled (default is enabled if not specified)
+            is_enabled = metadata_provider_enabled(provider_id, enabled_map)
+            if not is_enabled:
+                log.debug(f"Provider {provider_id} is globally disabled")
+                continue
+            try:
+                # Find the provider
+                provider = providers_by_id.get(provider_id)
+                
+                if not provider or not provider.active:
+                    continue
+                    
+                log.debug(f"Trying metadata provider: {provider.__name__}")
+                
+                # Search for metadata
+                results = provider.search(search_query, "", "en")
+                if not results or len(results) == 0:
+                    continue
+                    
+                # Prefer the candidate whose ISBN matches the book's existing ISBN
+                # over a blind first result (fork #402), and refuse a candidate
+                # that isn't plausibly this book at all (fork #1164).
+                metadata = _select_metadata_result(
+                    results, book_isbn,
+                    book_title=book.title, book_authors=book.authors,
+                )
+                if metadata is None:
+                    log.info(
+                        f"No confident match from {provider.__name__} for book: "
+                        f"{book.title} — leaving its metadata untouched"
+                    )
+                    continue
+
+                # Captured before the apply: _apply_metadata_to_book overwrites
+                # book.title, so logging it afterwards named the book we fetched
+                # rather than the book we changed (fork #1164).
+                searched_title = book.title
+
+                # Apply metadata to book
+                if _apply_metadata_to_book(book, metadata, calibre_db_instance):
+                    log.info(f"Successfully applied metadata from {provider.__name__} for book: {searched_title}")
+                    metadata_found = True
+                    break
+                    
+            except Exception as e:
+                log.warning(f"Error fetching metadata from provider {provider_id}: {e}")
+                continue
+                
+        return metadata_found
         
-        return {**default_config, **config}
     except Exception as e:
-        print(f"[CONFIG] Error reading dirs.json: {e}")
-        return default_config
-
-def load_cwa_settings():
-    """Read settings from cwa.db"""
-    default_settings = {
-        'metadata_check_interval_seconds': 60,
-        'metadata_sync_on_change': 1
-    }
-    
-    if not CWA_DB.exists():
-        return default_settings
-    
-    try:
-        conn = sqlite3.connect(CWA_DB)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM cwa_settings LIMIT 1")
-        row = cursor.fetchone()
-        
-        if row:
-            columns = [desc[0] for desc in cursor.description]
-            conn.close()
-            return {**default_settings, **dict(zip(columns, row))}
-        else:
-            conn.close()
-            return default_settings
-            
-    except sqlite3.OperationalError:
-        return default_settings
-
-def write_meta_status(state, detail=""):
-    """Write metadata detector status: state:timestamp:detail"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    status_line = f"{state}:{timestamp}:{detail}"
-    
-    try:
-        META_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(META_STATUS_FILE, 'w') as f:
-            f.write(status_line)
-    except IOError as e:
-        print(f"[META STATUS] Error writing status file: {e}")
-
-def clear_meta_status():
-    """Clear status file when idle"""
-    try:
-        if META_STATUS_FILE.exists():
-            META_STATUS_FILE.unlink()
-    except IOError:
-        pass
-
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    print("\n[SHUTDOWN] Received termination signal...")
-    write_meta_status("stopped", "shutdown requested")
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-def get_metadata_db_path(calibre_library_dir):
-    """Get path to metadata.db in Calibre library"""
-    meta_path = Path(calibre_library_dir) / "metadata.db"
-    return meta_path if meta_path.exists() else None
-
-def get_db_hash(db_path):
-    """Get MD5 hash of metadata.db file"""
-    if not db_path or not db_path.exists():
-        return None
-    
-    try:
-        file_size = db_path.stat().st_size
-        
-        if file_size > 1024 * 1024:  # > 1MB
-            with open(db_path, 'rb') as f:
-                data = f.read(4096)
-                f.seek(-4096, 2)
-                data += f.read(4096)
-        else:
-            data = db_path.read_bytes()
-        
-        return hashlib.md5(data).hexdigest()
-    except (OSError, IOError):
-        return None
-
-def get_last_checkpoint(checkpoint_path):
-    """Load last known hash"""
-    if not checkpoint_path.exists():
-        return None, None
-    
-    try:
-        with open(checkpoint_path, 'r') as f:
-            data = json.load(f)
-        return data.get('hash'), data.get('timestamp')
-    except (json.JSONDecodeError, IOError):
-        return None, None
-
-def save_checkpoint(checkpoint_path, hash_value, event_count):
-    """Save current hash and stats"""
-    checkpoint_data = {
-        'hash': hash_value,
-        'timestamp': datetime.now().isoformat(),
-        'event_count': event_count
-    }
-    
-    try:
-        with open(checkpoint_path, 'w') as f:
-            json.dump(checkpoint_data, f, indent=2)
-    except IOError as e:
-        print(f"[META] Error saving checkpoint: {e}")
-
-def sync_with_web_ui(settings):
-    """Trigger web app to reload library metadata"""
-    if not int(settings.get('metadata_sync_on_change', 1)):
-        print("[META] Web UI sync disabled in settings")
+        log.error(f"Error in fetch_and_apply_metadata: {e}", exc_info=True)
+        try:
+            if 'calibre_db_instance' in locals():
+                calibre_db_instance.session.rollback()
+        except Exception:
+            pass
         return False
+    finally:
+        try:
+            if 'calibre_db_instance' in locals():
+                calibre_db_instance.session.close()
+        except Exception as close_error:
+            log.warning(f"Error closing metadata database session: {close_error}")
+
+
+def _apply_metadata_to_book(book, metadata, calibre_db_instance) -> bool:
+    """
+    Apply fetched metadata to a book record.
     
-    import urllib.request
-    import urllib.error
-    
+    Args:
+        book: The book database record
+        metadata: The metadata record from provider
+        calibre_db_instance: Database instance
+        
+    Returns:
+        bool: True if metadata was successfully applied
+    """
+    cover_stage = None
+    previous_cover_metadata = (
+        getattr(book, 'has_cover', 0),
+        getattr(book, 'last_modified', None),
+    )
+    updated_without_cover = False
     try:
-        port = os.environ.get('CWA_PORT_OVERRIDE', '8083')
-        url = f"http://localhost:{port}/admin/reconnect_database"
-        req = urllib.request.Request(url, method='POST')
-        response = urllib.request.urlopen(req, timeout=10)
-        print(f"[META] ✓ Triggered web UI database reconnect")
-        return True
-    except (urllib.error.URLError, urllib.error.HTTPError) as e:
-        print(f"[META] ! Could not trigger web UI sync: {e}")
+        # Get CWA settings to check smart application preference and field selections
+        cwa_db = CWA_DB()
+        cwa_settings = cwa_db.get_cwa_settings()
+        use_smart_application = cwa_settings.get('auto_metadata_smart_application', False)
+        
+        updated = False
+        
+        # Update title - only if enabled in settings
+        if (cwa_settings.get('auto_metadata_update_title', True) and 
+            metadata.title and metadata.title.strip()):
+            if use_smart_application:
+                if len(metadata.title.strip()) > len(book.title.strip()):
+                    book.title = metadata.title.strip()
+                    updated = True
+            else:
+                book.title = metadata.title.strip()
+                updated = True
+            
+        # Update authors - only if enabled in settings. In smart mode, never clear
+        # an existing meaningful author (fork #403): a weak match must not replace a
+        # correct author with a foreign edition's translator.
+        if (cwa_settings.get('auto_metadata_update_authors', True) and
+            metadata.authors and len(metadata.authors) > 0 and
+            not (use_smart_application and _has_meaningful_authors(book))):
+            # Clear existing authors
+            book.authors.clear()
+            for author_name in metadata.authors:
+                if author_name and author_name.strip():
+                    author = calibre_db_instance.get_author_by_name(author_name.strip())
+                    if not author:
+                        author = db.Authors(author_name.strip(), author_name.strip())
+                        calibre_db_instance.session.add(author)
+                    book.authors.append(author)
+            updated = True
+            
+        # Update description - only if enabled in settings
+        if (cwa_settings.get('auto_metadata_update_description', True) and 
+            metadata.description and metadata.description.strip()):
+            current_description = book.comments[0].text if book.comments else ""
+            if use_smart_application:
+                if len(metadata.description.strip()) > len(current_description):
+                    if book.comments:
+                        book.comments[0].text = metadata.description.strip()
+                    else:
+                        comment = db.Comments(metadata.description.strip(), book.id)
+                        calibre_db_instance.session.add(comment)
+                    updated = True
+            else:
+                if book.comments:
+                    book.comments[0].text = metadata.description.strip()
+                else:
+                    comment = db.Comments(metadata.description.strip(), book.id)
+                    calibre_db_instance.session.add(comment)
+                updated = True
+            
+        # Update publisher - only if enabled in settings
+        if (cwa_settings.get('auto_metadata_update_publisher', True) and 
+            metadata.publisher and metadata.publisher.strip()):
+            if use_smart_application:
+                if not book.publishers or len(book.publishers) == 0:
+                    publisher = calibre_db_instance.get_publisher_by_name(metadata.publisher.strip())
+                    if not publisher:
+                        publisher = db.Publishers(metadata.publisher.strip(), metadata.publisher.strip())
+                        calibre_db_instance.session.add(publisher)
+                    book.publishers = [publisher]
+                    updated = True
+            else:
+                # Clear existing publishers and add new one
+                book.publishers.clear()
+                publisher = calibre_db_instance.get_publisher_by_name(metadata.publisher.strip())
+                if not publisher:
+                    publisher = db.Publishers(metadata.publisher.strip(), metadata.publisher.strip())
+                    calibre_db_instance.session.add(publisher)
+                book.publishers = [publisher]
+                updated = True
+                
+        # Update tags if available and enabled in settings
+        if (cwa_settings.get('auto_metadata_update_tags', True) and
+            hasattr(metadata, 'tags') and metadata.tags):
+            for tag_name in metadata.tags:
+                tag_name = str(tag_name or '').strip()
+                if not tag_name:
+                    continue
+                tag = calibre_db_instance.get_tag_by_name(tag_name)
+                if not tag:
+                    tag = db.Tags(name=tag_name)
+                    calibre_db_instance.session.add(tag)
+                if tag not in book.tags:
+                    book.tags.append(tag)
+                    updated = True
+            
+        # Update series if available and enabled in settings. Smart mode keeps an
+        # existing series rather than overwriting it (fork #403).
+        if (cwa_settings.get('auto_metadata_update_series', True) and
+            hasattr(metadata, 'series') and metadata.series and metadata.series.strip() and
+            not (use_smart_application and book.series)):
+            series = calibre_db_instance.get_series_by_name(metadata.series.strip())
+            if not series:
+                series = db.Series(metadata.series.strip(), metadata.series.strip())
+                calibre_db_instance.session.add(series)
+            book.series.clear()
+            book.series.append(series)
+            
+            # Set series index if available
+            if hasattr(metadata, 'series_index') and metadata.series_index:
+                try:
+                    # Convert to float first to validate, then store as string (DB column is String)
+                    float_value = float(metadata.series_index)
+                    book.series_index = str(float_value)
+                except (ValueError, TypeError):
+                    log.warning("Ignoring invalid series index %r for book %s", metadata.series_index, book.id)
+            updated = True
+            
+        # Update published date if available and enabled in settings. Smart mode
+        # keeps an existing publication date. Accept date-only values plus common
+        # ISO-8601 timestamps; invalid values are ignored rather than partially
+        # mutating the book.
+        if (cwa_settings.get('auto_metadata_update_published_date', True) and
+            hasattr(metadata, 'publishedDate') and metadata.publishedDate and
+            not (use_smart_application and _has_pubdate(book))):
+            parsed_pubdate = _parse_published_date(metadata.publishedDate)
+            if parsed_pubdate is not None:
+                if getattr(book, 'pubdate', None) != parsed_pubdate:
+                    book.pubdate = parsed_pubdate
+                    updated = True
+            else:
+                log.warning("Ignoring invalid published date %r for book %s", metadata.publishedDate, book.id)
+                
+        # Calibre-Web exposes ratings as 0–5 stars, while its Ratings table stores
+        # the value on a 0–10 scale (two internal points per star).  Do not accept
+        # the old 0–10 provider interpretation: a provider value of 5 means five
+        # stars, not ten stars.
+        if (cwa_settings.get('auto_metadata_update_rating', True) and
+            hasattr(metadata, 'rating') and metadata.rating is not None and
+            str(metadata.rating).strip() and
+            not (use_smart_application and book.ratings)):
+            try:
+                rating_value = float(metadata.rating)
+                if math.isfinite(rating_value) and 0.0 <= rating_value <= 5.0:
+                    rating_x2 = int(round(rating_value * 2))
+                    if book.ratings:
+                        if book.ratings[0].rating != rating_x2:
+                            book.ratings[0].rating = rating_x2
+                            updated = True
+                    else:
+                        rating = db.Ratings(rating=rating_x2)
+                        calibre_db_instance.session.add(rating)
+                        book.ratings = [rating]
+                        updated = True
+                else:
+                    log.warning("Ignoring out-of-range metadata rating %r for book %s; expected 0–5 stars", metadata.rating, book.id)
+            except (ValueError, TypeError):
+                log.warning("Ignoring invalid metadata rating %r for book %s", metadata.rating, book.id)
+                
+        # Update identifiers if available and enabled in settings. Smart mode fills
+        # in identifier types the book is missing but never overwrites an existing
+        # value — so a correct ISBN is not clobbered by a foreign edition's (fork #403).
+        if (cwa_settings.get('auto_metadata_update_identifiers', True) and
+            hasattr(metadata, 'identifiers') and metadata.identifiers):
+            for identifier_type, identifier_value in metadata.identifiers.items():
+                if identifier_type and identifier_value:
+                    # Check if identifier already exists
+                    existing = False
+                    for identifier in book.identifiers:
+                        if identifier.type == identifier_type:
+                            if not use_smart_application:
+                                identifier.val = identifier_value
+                                updated = True
+                            existing = True
+                            break
+                    if not existing:
+                        new_identifier = db.Identifiers(identifier_value, identifier_type, book.id)
+                        calibre_db_instance.session.add(new_identifier)
+                        book.identifiers.append(new_identifier)
+                        updated = True
+        
+        # Cover image (fork #404): download and apply through the same
+        # validated path the manual editor uses. Smart mode only fills a
+        # missing cover; the per-book cover lock is honored in both modes.
+        cover_updated = False
+        if (cwa_settings.get('auto_metadata_update_cover', True) and
+                not (use_smart_application and getattr(book, 'has_cover', 0))):
+            cover_stage = _apply_cover_from_metadata(book, metadata)
+            if cover_stage:
+                updated_without_cover = updated
+                updated = True
+                cover_updated = True
+                book.has_cover = 1
+
+        if cover_updated:
+            # A replaced cover IS a book change and has to be recorded as one.
+            # Writing cover.jpg alone leaves Books.last_modified untouched, and
+            # that column is the version token every cover URL carries — so an
+            # automated metadata fetch used to swap the image while every UI kept
+            # asking for the old URL. Cover responses are cacheable now, which
+            # turns that from "stale until the page reloads" into "stale until
+            # the browser evicts it", so this bump is load-bearing rather than
+            # cosmetic. Single source of truth: helper.mark_book_modified.
+            #
+            # set_dirty=False on purpose: `book` belongs to calibre_db_instance's
+            # session, while helper's set_metadata_dirty writes through helper's
+            # own module-level calibre_db — a different session, and the wrong
+            # one to touch from the ingest subprocess. The caller owns the
+            # metadata write-back for this very fetch; the timestamp is the part
+            # that was being dropped, and it is a plain attribute assignment.
+            from cps import helper
+            helper.mark_book_modified(book, set_dirty=False)
+
+        if updated:
+            calibre_db_instance.session.commit()
+            if cover_updated:
+                from cps import helper
+                published, publish_error = cover_stage.publish()
+                if not published:
+                    cover_stage.discard()
+                    cover_stage = None
+                    book.has_cover, book.last_modified = previous_cover_metadata
+                    try:
+                        calibre_db_instance.session.commit()
+                    except Exception as compensation_error:
+                        log.error(
+                            f"Cover metadata compensation failed for book {book.id} "
+                            f"after publish failure {publish_error}: {compensation_error}"
+                        )
+                        calibre_db_instance.session.rollback()
+                    return updated_without_cover
+                cover_stage = None
+                # #707: the new cover must also be embedded into the book file,
+                # not only written to cover.jpg. Best-effort by design — it
+                # queues an enforcement record, it does not perform the embed.
+                # AFTER the commit: the enforcer reads the book back out of
+                # metadata.db, so a record published ahead of the transaction
+                # can be consumed against the pre-commit row.
+                try:
+                    helper.log_metadata_change(book, {'cover': True})
+                except Exception as e:
+                    log.warning(f"Cover enforcement record failed for book {book.id}: {e}")
+                # Regenerate the cached thumbnails so the new cover shows in
+                # the grid, same as a manual cover edit.
+                try:
+                    helper.replace_cover_thumbnail_cache(
+                        book.id, book_path=book.path,
+                        last_modified=getattr(book, 'last_modified', None))
+                except Exception as e:
+                    log.warning(f"Cover thumbnail refresh failed for book {book.id}: {e}")
+
+        return updated
+        
+    except Exception as e:
+        log.error(f"Error applying metadata to book {getattr(book, 'id', 'unknown')}: {e}")
+        if cover_stage is not None:
+            cover_stage.discard()
+        calibre_db_instance.session.rollback()
+        book.has_cover, book.last_modified = previous_cover_metadata
         return False
 
-def main():
-    """Main monitoring loop with status file updates"""
-    config = load_dirs_config()
-    settings = load_cwa_settings()
-    
-    calibre_library_dir = config.get('calibre_library_dir')
-    checkpoint_path = Path(config.get('checkpoint_file'))
-    metadata_db = get_metadata_db_path(calibre_library_dir)
-    
-    if not metadata_db:
-        print(f"[META] ERROR: metadata.db not found in {calibre_library_dir}")
-        write_meta_status("error", "metadata.db not found")
-        return
-    
-    check_interval = int(settings.get('metadata_check_interval_seconds', 60))
-    
-    print("=" * 60)
-    print("[META] Calibre-Web NextGen Metadata Change Detector")
-    print("=" * 60)
-    print(f"Library Path:           {calibre_library_dir}")
-    print(f"metadata.db:            {metadata_db}")
-    print(f"Status File:            {META_STATUS_FILE}")
-    print(f"Checkpoint File:        {checkpoint_path}")
-    print(f"Check Interval:         {check_interval}s")
-    print("=" * 60)
-    print("")
-    
-    # Initialize checkpoint
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    current_hash = get_db_hash(metadata_db)
-    
-    if current_hash:
-        save_checkpoint(checkpoint_path, current_hash, 0)
-        write_meta_status("active", "monitoring metadata.db")
-        print(f"[META] Initialized with hash: {current_hash[:8]}...")
-    
-    event_count = 0
-    
-    while True:
-        # Reload settings periodically
-        settings = load_cwa_settings()
-        check_interval = int(settings.get('metadata_check_interval_seconds', 60))
-        
-        # Check if metadata detection is enabled
-        if not int(settings.get('auto_metadata_detection', 1)):
-            write_meta_status("paused", "disabled in settings")
-            time.sleep(check_interval)
-            continue
-        
-        # Get current hash
-        new_hash = get_db_hash(metadata_db)
-        last_hash, last_timestamp = get_last_checkpoint(checkpoint_path)
-        
-        # Check for changes
-        if new_hash and new_hash != last_hash:
-            event_count += 1
-            print(f"[META] ✨ CHANGE DETECTED! Event #{event_count}")
-            print(f"[META] Old hash: {last_hash[:8] if last_hash else 'N/A'}...")
-            print(f"[META] New hash: {new_hash[:8]}...")
-            
-            write_meta_status("changed", f"event #{event_count}")
-            
-            # Trigger web UI sync
-            sync_with_web_ui(settings)
-            
-            # Save checkpoint
-            save_checkpoint(checkpoint_path, new_hash, event_count)
-            
-            # Return to monitoring state
-            write_meta_status("active", "monitoring metadata.db")
-        else:
-            # Periodic status update (every 10 checks)
-            if event_count % 10 == 0:
-                write_meta_status("active", f"checked, no changes (#{event_count})")
-        
-        time.sleep(check_interval)
 
-if __name__ == "__main__":
-    main()
+def _apply_cover_from_metadata(book, metadata):
+    """Download and validate a staged provider cover for ``book`` (fork #404).
+
+    Routed through ``helper.save_cover_from_url`` so the ingest auto-fetch
+    gets the exact safeguards of the manual editor: advocate SSRF guard,
+    download size cap, and image-format validation. Returns a staged-cover
+    handle; the caller publishes it only after the metadata commit.
+
+    Fully self-contained failure boundary: this runs in the ingest
+    processor (no Flask app context, where the error-path ``_()`` calls in
+    helper can raise) and a cover problem must never void the rest of the
+    metadata application.
+    """
+    cover_url = str(getattr(metadata, 'cover', '') or '').strip()
+    if not cover_url or cover_url.endswith('/static/generic_cover.svg'):
+        # Providers fall back to the placeholder image when an edition has
+        # no cover — never overwrite a real cover with the placeholder.
+        return False
+    try:
+        from cps import helper
+        if helper.book_cover_is_locked(book.id):
+            log.info(f"Auto metadata fetch: cover locked for book {book.id}, skipping")
+            return False
+        result, error = helper.save_cover_from_url(cover_url, book.path)
+        if result:
+            return result
+        log.warning(f"Auto metadata fetch: cover download failed for book {book.id}: {error}")
+    except Exception as e:
+        log.warning(f"Auto metadata fetch: cover apply failed for book {book.id}: {e}")
+    return False
+
+
+def _normalize_isbn(value):
+    """Strip separators and upper-case so ISBNs compare regardless of formatting."""
+    return "".join(ch for ch in str(value) if ch.isalnum()).upper()
+
+
+def _book_isbn(book):
+    """Return the book's existing ISBN (preferring ISBN-13) or None (fork #402)."""
+    isbn13 = isbn = None
+    for ident in (getattr(book, "identifiers", None) or []):
+        itype = (getattr(ident, "type", "") or "").lower()
+        if itype in ("isbn13", "isbn_13"):
+            isbn13 = ident.val
+        elif itype == "isbn":
+            isbn = ident.val
+    return isbn13 or isbn
+
+
+# How close two titles must be, when their identifying words are NOT identical,
+# before metadata is applied. Deliberately near-exact: this path exists only to
+# absorb spelling/diacritic noise, not to judge whether two different titles are
+# "close enough". Applying nothing is recoverable; silently overwriting a book
+# with a different book's metadata is not (fork #1164).
+#
+# A plain character-similarity bar cannot do this job on its own: series titles
+# share a long prefix, so "Harry Potter and the Chamber of Secrets" scores 0.78
+# against "...and the Goblet of Fire" — high enough to pass any threshold loose
+# enough to accept real-world title variance. Identifying-word equality is what
+# separates "same book, different edition" from "next book in the series".
+_TITLE_FUZZY_MATCH_MIN = 0.92
+
+# Joining words carry no identifying weight and inflate similarity between
+# unrelated titles in the same series.
+_TITLE_STOPWORDS = frozenset((
+    "and", "or", "the", "a", "an", "of", "in", "on", "to", "for", "with",
+    "from", "at", "by", "its", "his", "her", "their",
+))
+
+# Generic descriptors publishers append to a title. Stripped so "The Devils"
+# still matches "The Devils: A Novel". Deliberately a short curated list of
+# non-identifying words — a substantive subtitle ("Dune: Messiah") must NOT be
+# stripped, or every book in a series collapses onto its sibling.
+_GENERIC_TITLE_TAILS = (
+    "a novel", "an novel", "novel", "a memoir", "a story", "stories",
+    "a biography", "an autobiography", "unabridged", "abridged",
+)
+
+_LEADING_ARTICLES = ("the ", "a ", "an ")
+
+
+def _normalize_title(value):
+    """Casefold and strip accents, bracketed asides, punctuation, a leading
+    article and any generic publisher tail, so titles compare on the words that
+    actually identify the book (fork #1164)."""
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).casefold()
+    # Series markers and format notes: "(First Law World)", "[Unabridged]".
+    text = re.sub(r"[(\[{][^)\]}]*[)\]}]", " ", text)
+    text = "".join(ch if ch.isalnum() else " " for ch in text)
+    text = " ".join(text.split())
+    for article in _LEADING_ARTICLES:
+        if text.startswith(article):
+            text = text[len(article):]
+            break
+    for tail in _GENERIC_TITLE_TAILS:
+        if text.endswith(" " + tail):
+            stripped = text[: -(len(tail) + 1)].strip()
+            if stripped:
+                text = stripped
+                break
+    return text
+
+
+def _title_content_words(value):
+    """The identifying words of a title, in order, with joining words removed
+    (fork #1164). Order is kept so "Blood and Iron" doesn't match "Iron and
+    Blood"."""
+    return tuple(w for w in _normalize_title(value).split()
+                 if w not in _TITLE_STOPWORDS)
+
+
+def _title_similarity(left, right):
+    """0.0-1.0 similarity of two titles after normalization (fork #1164).
+
+    1.0 exactly when the identifying words are the same in the same order —
+    that is the only signal trusted to mean "the same book". Anything else is
+    scored on character similarity and must clear ``_TITLE_FUZZY_MATCH_MIN``,
+    which is set high enough that a sibling in the same series cannot pass.
+    """
+    a, b = _normalize_title(left), _normalize_title(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    words_a, words_b = _title_content_words(left), _title_content_words(right)
+    if words_a and words_a == words_b:
+        return 1.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _author_name_tokens(authors):
+    """Normalized name words for a book's or candidate's authors (fork #1164).
+
+    Every word is kept rather than just the last one, because name ORDER is not
+    dependable here: Calibre stores and sorts authors as "King, Stephen" while
+    providers return "Stephen King", so keying on the final word would make
+    those two disagree and reject a correct match for most of a library. Words
+    of one or two characters are dropped so initials ("J.") neither match nor
+    block.
+
+    Accepts ORM author objects and the plain strings providers return. A bare
+    string is wrapped rather than iterated, which would otherwise walk it one
+    character at a time.
+    """
+    if isinstance(authors, str):
+        authors = [authors]
+    tokens = set()
+    for author in (authors or []):
+        name = author if isinstance(author, str) else getattr(author, "name", "")
+        tokens.update(w for w in _normalize_title(name).split() if len(w) > 2)
+    return tokens
+
+
+def _authors_agree(book_authors, candidate_authors):
+    """Return True when at least one complete author identity agrees.
+
+    Names are normalized so ``King, Stephen`` and ``Stephen King`` agree, but a
+    single shared first/last-name token is not enough. This keeps author matching
+    useful as a rejection guard without allowing common surnames to match books
+    by unrelated authors.
+    """
+    def keys(authors):
+        if isinstance(authors, str):
+            authors = [authors]
+        out = set()
+        for author in (authors or []):
+            name = author if isinstance(author, str) else getattr(author, 'name', '')
+            words = [w for w in _normalize_title(name).split() if len(w) > 1]
+            if words:
+                out.add(' '.join(sorted(words)))
+        return out
+    return bool(keys(book_authors) & keys(candidate_authors))
+
+
+def _select_metadata_result(results, book_isbn, book_title=None, book_authors=None):
+    """Pick the provider result that is actually the same book.
+
+    ISBN wins outright when the book carries one (fork #402). Otherwise — the
+    normal case for a freshly ingested EPUB, which has no ISBN — the candidates
+    are scored on title similarity and the BEST one is returned, but only if it
+    clears the confidence bar. ``None`` means "no candidate is plausibly this
+    book"; the caller must then apply nothing rather than fall back to a guess.
+
+    Before fork #1164 this fell through to ``results[0]`` whenever ISBN could not
+    decide, so whatever the provider ranked first was applied unconditionally —
+    which is how a search for "The Devils" overwrote the book with "The Heretics".
+
+    ``book_title``/``book_authors`` default to ``None`` for backwards
+    compatibility; when no title is supplied the legacy first-result behaviour is
+    kept, so the gate is only ever as strong as the caller. ``fetch_and_apply_
+    metadata`` always passes them and a test pins that call site.
+    """
+    if book_isbn:
+        target = _normalize_isbn(book_isbn)
+        for result in results:
+            identifiers = getattr(result, "identifiers", None) or {}
+            for key in ("isbn", "isbn13", "isbn_13", "isbn10"):
+                candidate = identifiers.get(key)
+                if candidate and _normalize_isbn(candidate) == target:
+                    return result
+
+    if not book_title:
+        return results[0]
+
+    best = None
+    best_score = 0.0
+    for result in results:
+        score = _title_similarity(book_title, getattr(result, "title", ""))
+        if score > best_score:
+            best, best_score = result, score
+
+    if best is None:
+        return None
+
+    if best_score < 1.0 and best_score < _TITLE_FUZZY_MATCH_MIN:
+        log.info(
+            "Rejected metadata for %r: closest candidate %r scored %.2f, below "
+            "the confidence bar — applying nothing rather than a different book",
+            book_title, getattr(best, "title", ""), best_score,
+        )
+        return None
+
+    # Titles can collide across genuinely different books. When both sides name
+    # an author and none of them agree, that's a different book, not an edition.
+    candidate_authors = getattr(best, "authors", None)
+    if (_author_name_tokens(book_authors) and _author_name_tokens(candidate_authors)
+            and not _authors_agree(book_authors, candidate_authors)):
+        log.info(
+            "Rejected metadata for %r: candidate %r matches on title but its "
+            "author differs — applying nothing rather than a different book",
+            book_title, getattr(best, "title", ""),
+        )
+        return None
+
+    return best
+
+
+def _parse_published_date(value):
+    """Parse provider publication dates into a ``date`` without guessing."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or '').strip()
+    if not text:
+        return None
+    for fmt in ('%Y-%m-%d', '%Y-%m', '%Y'):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    # ISO-8601 timestamps, including a trailing Z.
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00')).date()
+    except ValueError:
+        return None
+
+
+def _has_meaningful_authors(book):
+    """True if the book already has a real author (not empty / not the Calibre
+    'Unknown' placeholder), so smart mode won't overwrite it (fork #403)."""
+    authors = getattr(book, "authors", None) or []
+    return any((getattr(a, "name", "") or "").strip().lower() not in ("", "unknown")
+               for a in authors)
+
+
+def _has_pubdate(book):
+    """True if the book already has a real publication date (not the Calibre
+    'undefined' sentinel year 101), so smart mode won't overwrite it (fork #403)."""
+    pubdate = getattr(book, "pubdate", None)
+    return bool(pubdate) and getattr(pubdate, "year", 0) > 101
+
+
+def _parse_metadata_providers_enabled(raw_value):
+    """Lightweight parser for metadata_providers_enabled without importing cwa_functions."""
+    try:
+        if raw_value is None:
+            return {}
+        if isinstance(raw_value, bytes):
+            raw_value = raw_value.decode('utf-8', errors='ignore')
+        if isinstance(raw_value, str):
+            s = raw_value.strip()
+            if not s:
+                return {}
+            if s.startswith("'") and s.endswith("'"):
+                s = s[1:-1]
+            if not s:
+                return {}
+            data = json.loads(s)
+            return data if isinstance(data, dict) else {}
+        if isinstance(raw_value, dict):
+            return raw_value
+        return {}
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        return {}
