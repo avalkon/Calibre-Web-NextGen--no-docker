@@ -2,11 +2,9 @@
   <img src="README_images/calibre-web-nextgen-banner.png" alt="Calibre-Web NextGen" width="520">
 </p>
 
-[![Latest release](https://img.shields.io/github/v/release/new-usemame/Calibre-Web-NextGen)](https://github.com/new-usemame/Calibre-Web-NextGen/releases/latest)
-[![Container](https://img.shields.io/badge/ghcr.io-calibre--web--nextgen-blue?logo=docker)](https://github.com/new-usemame/Calibre-Web-NextGen/pkgs/container/calibre-web-nextgen)
-[![Open issues](https://img.shields.io/github/issues/new-usemame/Calibre-Web-NextGen)](https://github.com/new-usemame/Calibre-Web-NextGen/issues)
-[![Sponsor](https://img.shields.io/badge/Sponsor-nothing%20paywalled-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/new-usemame)
-
+[![Latest release](https://img.shields.io/github/v/release/new-usemame/Calibre-Web-NextGen)](https://github.com/avalkon/Calibre-Web-NextGen--no-docker/releases/latest)
+[![Container](https://img.shields.io/badge/ghcr.io-calibre--web--nextgen-blue?logo=docker)](https://github.com/avalkon/Calibre-Web-NextGen--no-docker/pkgs/container/calibre-web-nextgen)
+[![Open issues](https://img.shields.io/github/issues/avalkon/Calibre-Web-NextGen--no-docker)](https://github.com/avalkon/Calibre-Web-NextGen--no-docker/issues)
 
 ## Table of contents
 
