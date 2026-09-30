@@ -14,6 +14,7 @@ set -e
 #######################################
 INSTALL_DIR="/opt/calibre-web-nextgen"
 CONFIG_DIR="${INSTALL_DIR}/config"
+INGEST_DIR="/srv/calibre-ingest"
 SERVICE_USER="acw"
 SERVICE_GROUP="acw"
 USER_USER="yourusername"
@@ -120,6 +121,15 @@ ls -la "$CONFIG_DIR"
 echo -e "${GREEN}[INSTALL]${NC} Config directory created at $CONFIG_DIR"
 echo ""
 
+echo -e "${YELLOW}[STEP 6.5]${NC} Creating ingest directories..."
+mkdir -p "$INGEST_DIR"
+mkdir -p "$INGEST_DIR/config"
+mkdir -p "$INGEST_DIR/processed"
+mkdir -p "$INGEST_DIR/failed"
+ls -la "$INGEST_DIR"
+echo -e "${GREEN}[INSTALL]${NC} Ingest directory created at $INGEST_DIR"
+echo ""
+
 #######################################
 # Step 5: Create Systemd Service Files
 #######################################
@@ -140,6 +150,8 @@ ExecStart=${INSTALL_DIR}/venv/bin/python cps.py -p ${CONFIG_DIR}/app.db
 Restart=always
 RestartSec=10
 UMask=022
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -153,14 +165,15 @@ Requires=calibre-web-nextgen.service
 
 [Service]
 Type=simple
-User=acw
-Group=acw
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 Environment="PATH=${INSTALL_DIR}/venv/bin:${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/opt/calibre-web-nextgen/venv/bin/python /opt/calibre-web-nextgen/cps/auto-ingest.py
+ExecStart=${INSTALL_DIR}/venv/bin/python ${INSTALL_DIR}/cps/auto-ingest.py
 Restart=always
 RestartSec=15
 StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -174,15 +187,18 @@ Requires=calibre-web-nextgen.service
 
 [Service]
 Type=simple
-User=acw
-Group=acw
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 Environment="PATH=${INSTALL_DIR}/venv/bin:${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
+Environment="CWA_APP_DB_PATH=${INSTALL_DIR}/config/app.db"
 Environment="CWA_METADATA_CHANGE_LOGS_DIR=${INSTALL_DIR}/config/metadata_change_logs"
 Environment="CWA_METADATA_TEMP_DIR=${INSTALL_DIR}/config/metadata_temp"
 ExecStart=/bin/bash ${INSTALL_DIR}/scripts/metadata-detector.sh
 Restart=always
 RestartSec=15
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -202,8 +218,12 @@ echo -e "${YELLOW}[STEP 8]${NC} Setting file permissions..."
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 chmod -R 755 "$INSTALL_DIR"
 chmod 775 "$CONFIG_DIR"
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INGEST_DIR"
+chmod -R 777 "$INGEST_DIR"
+
 echo "--- Permissions set ---"
 ls -la "$INSTALL_DIR"
+ls -la "$INGEST_DIR"
 echo ""
 echo -e "${RED}[WARN]${NC} IMPORTANT: Run this command for your library:"
 echo "   sudo setfacl -R -m u:${SERVICE_USER}:rwx '${CALIBRE_LIBRARY}'"
@@ -242,7 +262,11 @@ echo ""
 echo -e "${YELLOW}[STEP 10]${NC} Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable calibre-web-nextgen
+systemctl enable calibre-web-ingest
+systemctl enable calibre-web-meta
 systemctl start calibre-web-nextgen
+systemctl start calibre-web-ingest
+systemctl start calibre-web-meta
 
 #######################################
 # Step 9: Verify Installation
@@ -255,8 +279,16 @@ echo ""
 echo -e "${YELLOW}[INFO]${NC} Service Status:"
 systemctl status calibre-web-nextgen --no-pager
 echo ""
+systemctl status calibre-web-ingest --no-pager
+echo ""
+systemctl status calibre-web-meta --no-pager
+echo ""
 echo -e "${YELLOW}[INFO]${NC} Recent Logs:"
 journalctl -u calibre-web-nextgen -n 30 --no-pager
+echo ""
+journalctl -u calibre-web-ingest -n 30 --no-pager
+echo ""
+journalctl -u calibre-web-meta -n 30 --no-pager
 echo ""
 echo -e "${GREEN}[INSTALL]${NC} ==="
 echo -e "${GREEN}[INSTALL]${NC} Access Information"
