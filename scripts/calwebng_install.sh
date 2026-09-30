@@ -60,7 +60,26 @@ apt-get install -y \
     python3-dev \
     libldap2-dev \
     libsasl2-dev \
-    libssl-dev
+    libssl-dev \
+    wget \
+    xz-utils \
+    xdg-utils \
+    ca-certificates \
+    libegl1 \
+    libopengl0
+
+# Remove distro Calibre if it was installed previously
+if dpkg-query -W -f='${Status}' calibre 2>/dev/null | grep -q "install ok installed"; then
+    sudo apt-get remove -y calibre
+fi
+
+# Install/upgrade current official Calibre binary release
+wget -nv -O /tmp/calibre-linux-installer.sh \
+    https://download.calibre-ebook.com/linux-installer.sh
+
+sh /tmp/calibre-linux-installer.sh install_dir=/opt
+
+rm -f /tmp/calibre-linux-installer.sh
 
 echo -e "${GREEN}[INSTALL]${NC} System dependencies installed."
 echo ""
