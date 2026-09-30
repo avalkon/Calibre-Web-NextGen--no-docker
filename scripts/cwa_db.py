@@ -820,7 +820,6 @@ class CWA_DB:
 
         self.con.commit()
 
-
     def enforce_add_entry_from_dir(self, book_dicts: list[dict[str,str]]):
         """Adds an entry to the db when cover_enforcer is ran with a directory"""
         for book in book_dicts:
