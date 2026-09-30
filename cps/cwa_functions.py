@@ -1904,6 +1904,8 @@ def cwa_flash_status():
 
     return redirect(url_for('admin.admin'))
 
+
+
 ##————————————————————————————————————————————————————————————————————————————##
 ##                                                                            ##
 ##                                 CWA LOGS                                   ##
