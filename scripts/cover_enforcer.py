@@ -1175,6 +1175,7 @@ class Enforcer:
         )
         return [book]
 
+
     @staticmethod
     def _reset_book_dir_ownership(book_dir: str) -> None:
         """
@@ -1185,7 +1186,7 @@ class Enforcer:
         same unprivileged account that owns or has access to the library, so
         ownership must not be changed.
         """
-
+    
         # Native/non-root installation: nothing to do.
         if os.geteuid() != 0:
             return
