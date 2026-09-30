@@ -1177,29 +1177,61 @@ class Enforcer:
 
     @staticmethod
     def _reset_book_dir_ownership(book_dir: str) -> None:
-        """Reset the book directory and its files to abc:abc (LinuxServer.io PUID/PGID) after running as root.
-
-        Why: this script runs under s6 as root so it can call calibredb/ebook-polish, but the
-        Calibre-Web Flask app runs as 'abc' (UID 1000). Files written here as root would be
-        unwritable for cover-from-URL saves later, surfacing as
-        'Cover-file is not a valid image file, or could not be stored'.
         """
+        Restore ownership after metadata enforcement when running in a
+        container/root environment.
+
+        In a native/no-Docker installation the enforcer normally runs as the
+        same unprivileged account that owns or has access to the library, so
+        ownership must not be changed.
+        """
+
+        # Native/non-root installation: nothing to do.
+        if os.geteuid() != 0:
+            return
+
+        # Only honor explicitly configured container-style ownership.
+        puid = os.environ.get("PUID")
+        pgid = os.environ.get("PGID")
+
+        if puid is None or pgid is None:
+            return
+
         try:
-            uid = int(os.environ.get("PUID", "1000"))
-            gid = int(os.environ.get("PGID", "1000"))
+            uid = int(puid)
+            gid = int(pgid)
         except (TypeError, ValueError):
-            uid, gid = 1000, 1000
+            print(
+                "[cover-metadata-enforcer] Warning: "
+                f"invalid PUID/PGID values: {puid!r}/{pgid!r}",
+                flush=True,
+            )
+            return
+
         try:
-            if os.path.isdir(book_dir):
-                os.chown(book_dir, uid, gid)
-                for entry in os.listdir(book_dir):
-                    path = os.path.join(book_dir, entry)
-                    try:
-                        os.chown(path, uid, gid)
-                    except OSError:
-                        pass
+            if not os.path.isdir(book_dir):
+                return
+
+            os.chown(book_dir, uid, gid)
+
+            for entry in os.listdir(book_dir):
+                path = os.path.join(book_dir, entry)
+
+                try:
+                    os.chown(path, uid, gid)
+                except OSError as e:
+                    print(
+                        "[cover-metadata-enforcer] Warning: "
+                        f"failed to chown {path}: {e}",
+                        flush=True,
+                    )
+
         except OSError as e:
-            print(f"[cover-metadata-enforcer] Warning: failed to chown {book_dir}: {e}", flush=True)
+            print(
+                "[cover-metadata-enforcer] Warning: "
+                f"failed to reset ownership for {book_dir}: {e}",
+                flush=True,
+            )
 
 
     def enforce_all_covers(self) -> tuple[int, float, int] | tuple[bool, bool, bool]:
