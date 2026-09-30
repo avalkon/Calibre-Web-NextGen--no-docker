@@ -771,13 +771,53 @@ class CWA_DB:
         # serving the values loaded in __init__ for the life of the process.
         self.cwa_settings = self.get_cwa_settings()
 
+    def enforce_add_entry_from_log(
+        self,
+        log_info: dict,
+        trigger_type: str = "auto -log",
+    ):
+        """Add an enforcement-history entry from a metadata change log."""
 
-    def enforce_add_entry_from_log(self, log_info: dict, trigger_type: str = "auto -log"):
-        """Adds an entry to the db from a change log file"""
+        authors = log_info.get("authors", "")
+
+        if isinstance(authors, (list, tuple, set)):
+            authors = " & ".join(
+                str(author).strip()
+                for author in authors
+                if str(author).strip()
+            )
+        elif authors is None:
+            authors = ""
+        else:
+            authors = str(authors)
+
+        timestamp = str(log_info.get("timestamp", ""))
+        book_id = str(log_info.get("book_id", ""))
+        title = str(log_info.get("title", ""))
+        file_path = str(log_info.get("file_path") or "unknown")
+
         self.cur.execute(
-            "INSERT INTO cwa_enforcement(timestamp, book_id, book_title, author, file_path, trigger_type) VALUES (?, ?, ?, ?, ?, ?);",
-            (log_info['timestamp'], log_info['book_id'], log_info['title'], log_info['authors'], log_info['file_path'], trigger_type)
+            """
+            INSERT INTO cwa_enforcement(
+                timestamp,
+                book_id,
+                book_title,
+                author,
+                file_path,
+                trigger_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (
+                timestamp,
+                book_id,
+                title,
+                authors,
+                file_path,
+                str(trigger_type),
+            ),
         )
+
         self.con.commit()
 
 
