@@ -449,85 +449,85 @@ class Enforcer:
         return unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii')
 
 
-def get_split_library(self):
-    """
-    Check whether split-library mode is enabled.
+    def get_split_library(self):
+        """
+        Check whether split-library mode is enabled.
 
-    The settings must come from Calibre-Web's app.db, not cwa.db
-    or the Calibre metadata.db.
-    """
-    app_db_path = get_app_db_path()
-    print(
-      f"[cover-enforcer] Calibre-Web app DB: {app_db_path}",
-      flush=True,
-    )
-
-    try:
-        with sqlite3.connect(
-            app_db_path,
-            timeout=30,
-        ) as con:
-            cur = con.cursor()
-
-            # Verify that we really opened the Calibre-Web application DB.
-            table = cur.execute(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'table'
-                  AND name = 'settings'
-                """
-            ).fetchone()
-
-            if not table:
-                print(
-                    "[cover-enforcer] WARN: "
-                    f"{app_db_path} does not contain the "
-                    "Calibre-Web 'settings' table; "
-                    "split-library detection disabled.",
-                    flush=True,
-                )
-                return None
-
-            row = cur.execute(
-                """
-                SELECT
-                    config_calibre_split,
-                    config_calibre_split_dir,
-                    config_calibre_dir
-                FROM settings
-                LIMIT 1
-                """
-            ).fetchone()
-
-            if not row:
-                print(
-                    "[cover-enforcer] WARN: "
-                    f"No settings row found in {app_db_path}; "
-                    "split-library detection disabled.",
-                    flush=True,
-                )
-                return None
-
-            split_enabled, split_path, db_path = row
-
-            if split_enabled:
-                return {
-                    "split_path": split_path,
-                    "db_path": db_path,
-                }
-
-            return None
-
-    except sqlite3.Error as e:
+        The settings must come from Calibre-Web's app.db, not cwa.db
+        or the Calibre metadata.db.
+        """
+        app_db_path = app_paths.app_db_path()
         print(
-            "[cover-enforcer] WARN: "
-            f"Could not read Calibre-Web settings from "
-            f"{app_db_path}: {e}. "
-            "Continuing with split-library support disabled.",
+            f"[cover-enforcer] Calibre-Web app DB: {app_db_path}",
             flush=True,
         )
-        return None
+
+        try:
+            with sqlite3.connect(
+                app_db_path,
+                timeout=30,
+            ) as con:
+                cur = con.cursor()
+
+                # Verify that we really opened the Calibre-Web application DB.
+                table = cur.execute(
+                    """
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    AND name = 'settings'
+                    """
+                ).fetchone()
+
+                if not table:
+                    print(
+                        "[cover-enforcer] WARN: "
+                        f"{app_db_path} does not contain the "
+                        "Calibre-Web 'settings' table; "
+                        "split-library detection disabled.",
+                        flush=True,
+                    )
+                    return None
+
+                row = cur.execute(
+                    """
+                    SELECT
+                        config_calibre_split,
+                        config_calibre_split_dir,
+                        config_calibre_dir
+                    FROM settings
+                    LIMIT 1
+                    """
+                ).fetchone()
+
+                if not row:
+                    print(
+                        "[cover-enforcer] WARN: "
+                        f"No settings row found in {app_db_path}; "
+                        "split-library detection disabled.",
+                        flush=True,
+                    )
+                    return None
+
+                split_enabled, split_path, db_path = row
+
+                if split_enabled:
+                    return {
+                        "split_path": split_path,
+                        "db_path": db_path,
+                    }
+
+                return None
+
+        except sqlite3.Error as e:
+            print(
+                "[cover-enforcer] WARN: "
+                f"Could not read Calibre-Web settings from "
+                f"{app_db_path}: {e}. "
+                "Continuing with split-library support disabled.",
+                flush=True,
+            )
+            return None
 
 
     def get_calibre_library(self) -> str:
