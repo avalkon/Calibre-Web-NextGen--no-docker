@@ -1175,7 +1175,6 @@ class Enforcer:
         )
         return [book]
 
-
     @staticmethod
     def _reset_book_dir_ownership(book_dir: str) -> None:
         """
@@ -1186,7 +1185,7 @@ class Enforcer:
         same unprivileged account that owns or has access to the library, so
         ownership must not be changed.
         """
-    
+
         # Native/non-root installation: nothing to do.
         if os.geteuid() != 0:
             return
@@ -1233,7 +1232,6 @@ class Enforcer:
                 f"failed to reset ownership for {book_dir}: {e}",
                 flush=True,
             )
-
 
     def enforce_all_covers(self) -> tuple[int, float, int] | tuple[bool, bool, bool]:
         """Will force the covers and metadata to be re-generated for all books in the library"""
