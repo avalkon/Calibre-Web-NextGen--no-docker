@@ -23,20 +23,47 @@
 
 ## Why this fork exists
 
-All upstream sources have determined that porting the install to bare-metal is not on their roadmap. Here, we're breaking Docker functionality and replacing it with bare-metal capability. Don't try to run this with Docker, it won't work. Too many things have already been changed.
+In short, it's for all of us old people who tried Docker and found it to be alien and undesirable, but still 
+want things like auto-ingest. It's a bit of a mix of NextGen, AutoCaliWeb, Calibre-web-Automated, 
+and Calibre-web, with many many hours of code holding the scavenged bits together. 
+
+All upstream sources have determined that porting the install to bare-metal is not on their roadmap. 
+Here, we're breaking Docker functionality and replacing it with bare-metal capability. Don't try to 
+run this with Docker, it won't work the way the original would. Too many things have already been changed.
+Stick to the upstream version if you use containers.
+
+Autocaliweb has bare-metal capability, why not use that? Well, auto-ingest and metadata change detection 
+still don't work on ACW's bare-metal installation, and I had to do a lot of modifying to get things 
+like edit-selected-books running, some of these are things that just plain worked when I tried running 
+NextGen by itself on my local machine. Both ACW and CWNG have explicitly stated that bare-metal deployment 
+is not on their priority list. It's the only thing on my priority list.
 
 ---
 
 ## What's working
 
-- Cover saves from Hardcover, Google Books, iTunes, and Open Library (was returning "not a valid image" since 4.0.6).
 - Automatic ingest and convert is operational.
 - Automatic metadata change detector/cover enforcer is working.
 - Check nextgen status button in admin panel now works.
+- OPDS works.
+- Koreader sync works
 
 ---
 
 ## Dockerless install
+
+The absolute easiest way to install is to jump over to https://github.com/avalkon/server-builder
+and download server-install.sh and run:
+
+```
+sudo chmod +x ./server-install.sh
+sudo ./server-install.sh --install-calibre
+```
+
+It will prompt you for your library location, clone the repo, install the most recent version of Calibre, 
+and install this version of Nextgen. It can also install a lot of other services, if you want them.
+
+If you rather use my provided install script:
 
 ```
 sudo mkdir /opt/calibre-web-nextgen
