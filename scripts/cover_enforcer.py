@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 import unicodedata
+import tempfile
 
 # s6 launches this as `python3 <app>/scripts/cover_enforcer.py` with an empty PYTHONPATH,
 # so sys.path[0] is scripts/ and the project root that owns the `cps` package is not on
@@ -317,50 +318,147 @@ class Book:
 
 
     def get_new_metadata_path(self) -> str:
-        """Uses the export function of the calibredb utility to export any new metadata for the given book to metadata_temp, and returns the path to the new metadata.opf"""
-        # Add retry logic with exponential backoff to handle database locks
+        """
+        Export fresh metadata for this book using calibredb and return the
+        exported metadata.opf path.
+    
+        Each invocation uses its own temporary directory so stale exports or
+        simultaneous metadata-enforcement jobs cannot interfere with each other.
+        """
         max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # Add small delay before first attempt to allow other operations to complete
+
+        # Use a unique directory for this particular book/export.
+        export_dir = tempfile.mkdtemp(
+            prefix=f"metadata_{self.book_id}_",
+            dir=metadata_temp_dir,
+        )
+
+        try:
+            for attempt in range(max_retries):
                 if attempt > 0:
-                    delay = 2 ** attempt  # Exponential backoff: 2s, 4s
-                    print(f"[cover-metadata-enforcer] Retrying calibredb export (attempt {attempt + 1}/{max_retries}) after {delay}s delay...", flush=True)
+                    delay = 2 ** attempt
+                    print(
+                        "[cover-metadata-enforcer] "
+                        f"Retrying calibredb export "
+                        f"(attempt {attempt + 1}/{max_retries}) "
+                        f"after {delay}s delay...",
+                        flush=True,
+                    )
                     time.sleep(delay)
                 else:
-                    # Small initial delay to ensure database writes are flushed
+                    # Allow Calibre's preceding DB transaction to settle.
                     time.sleep(0.5)
-                
-                # metadata_temp_dir now lives under /config (#995), which is user-mounted:
-                # on a bind mount it can be absent however carefully the image seeds it.
-                # Creating it here costs nothing and keeps the export from failing on a
-                # fresh volume.
-                os.makedirs(metadata_temp_dir, exist_ok=True)
-                result = subprocess.run(
-                    ["calibredb", "export", "--with-library", self.calibre_library, "--to-dir", metadata_temp_dir, self.book_id],
-                    env=self.calibre_env, check=False, capture_output=True, text=True, timeout=60
-                )
-                
-                if result.returncode == 0:
-                    temp_files = [os.path.join(dirpath,f) for (dirpath, dirnames, filenames) in os.walk(metadata_temp_dir) for f in filenames]
-                    opf_files = [f for f in temp_files if f.endswith('.opf')]
-                    if opf_files:
-                        return opf_files[0]
-                    else:
-                        raise FileNotFoundError("No .opf file found after calibredb export")
-                else:
-                    if attempt < max_retries - 1 and "database is locked" in result.stderr.lower():
-                        continue  # Retry on database lock
-                    else:
-                        raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
-            except subprocess.TimeoutExpired:
-                if attempt < max_retries - 1:
-                    continue
-                else:
+
+                try:
+                    result = subprocess.run(
+                        [
+                            "calibredb",
+                            "export",
+                            "--with-library",
+                            self.calibre_library,
+                            "--to-dir",
+                            export_dir,
+                            self.book_id,
+                        ],
+                        env=self.calibre_env,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+    
+                except subprocess.TimeoutExpired:
+                    print(
+                        "[cover-metadata-enforcer] "
+                        f"WARN: calibredb export timed out for "
+                        f"book_id={self.book_id} "
+                        f"(attempt {attempt + 1}/{max_retries})",
+                        flush=True,
+                    )
+
+                    if attempt < max_retries - 1:
+                        continue
+
                     raise
-        
-        # If all retries failed
-        raise RuntimeError(f"Failed to export metadata for book {self.book_id} after {max_retries} attempts")
+
+                if result.returncode != 0:
+                    stderr = (result.stderr or "").strip()
+                    stdout = (result.stdout or "").strip()
+
+                    print(
+                        "[cover-metadata-enforcer] "
+                        f"ERROR: calibredb export exited with "
+                        f"status {result.returncode} for "
+                        f"book_id={self.book_id}",
+                        flush=True,
+                    )
+
+                    if stdout:
+                        print(
+                            "[cover-metadata-enforcer] "
+                            f"calibredb STDOUT:\n{stdout}",
+                            flush=True,
+                        )
+
+                    if stderr:
+                        print(
+                            "[cover-metadata-enforcer] "
+                            f"calibredb STDERR:\n{stderr}",
+                            flush=True,
+                        )
+
+                    # Database locking is potentially transient.
+                    if (
+                        attempt < max_retries - 1
+                        and "database is locked" in stderr.lower()
+                    ):
+                        continue
+
+                    raise RuntimeError(
+                        f"calibredb export failed for "
+                        f"book_id={self.book_id} "
+                        f"(exit={result.returncode}): "
+                        f"{stderr or stdout or 'no output'}"
+                    )
+
+                # Export succeeded. Search ONLY this invocation's directory.
+                opf_files = []
+
+                for dirpath, dirnames, filenames in os.walk(export_dir):
+                    for filename in filenames:
+                        if filename.lower().endswith(".opf"):
+                            opf_files.append(
+                                os.path.join(dirpath, filename)
+                            )
+
+                if opf_files:
+                    print(
+                        "[cover-metadata-enforcer] "
+                        f"Exported metadata for book_id={self.book_id}: "
+                        f"{opf_files[0]}",
+                        flush=True,
+                    )
+
+                    return opf_files[0]
+
+                raise FileNotFoundError(
+                    f"calibredb export succeeded for book_id={self.book_id}, "
+                    f"but no .opf file was found under {export_dir}"
+                )
+
+            raise RuntimeError(
+                f"Failed to export metadata for book {self.book_id} "
+                f"after {max_retries} attempts"
+            )
+
+        except Exception:
+            # Keep the failed export directory around for diagnosis.
+            print(
+                "[cover-metadata-enforcer] "
+                f"Failed export retained for inspection: {export_dir}",
+                flush=True,
+            )
+            raise
 
 
     def export_as_dict(self) -> dict[str,str | None]:
@@ -709,134 +807,331 @@ class Enforcer:
 
 
     def get_book_dir_from_log(self, log_info: dict) -> str:
-        """Resolve the on-disk book directory prioritizing ones that contain supported files.
-        Order of preference: DB path -> any (id)-suffix dirs -> reconstructed ASCII/raw (based on config).
-        Within each, prefer the one that actually contains a supported format (self.supported_formats). When config_unicode_filename is True,
-        prefer the ASCII path over a diacritic sibling if both exist."""
+        """
+        Resolve the on-disk Calibre book directory.
+    
+        Resolution order:
+          1. Calibre metadata.db path (authoritative when it exists and contains
+             a supported book file)
+          2. Directory search by Calibre book ID suffix: "(book_id)"
+          3. Reconstructed path from metadata-change log
+
+        The Calibre database is preferred because its books.path column records
+        the actual relative path used by the library and avoids reconstructing
+        paths from potentially incomplete metadata-change logs.
+        """
         book_id = str(log_info['book_id']).strip()
 
         candidate_dirs: list[str] = []
 
-        # 1) DB-based resolution (split-library aware)
+        # ------------------------------------------------------------------
+        # 1) Resolve from Calibre metadata.db
+        # ------------------------------------------------------------------
         try:
             metadb_path = os.path.join(
-                (self.split_library or {}).get("db_path", self.calibre_library),
+                (self.split_library or {}).get(
+                    "db_path",
+                     self.calibre_library
+                ),
                 "metadata.db",
             )
+
             con = sqlite3.connect(metadb_path, timeout=60)
+
             try:
                 cur = con.cursor()
-                row = cur.execute('SELECT path FROM books WHERE id = ?', (book_id,)).fetchone()
+                row = cur.execute(
+                    'SELECT path FROM books WHERE id = ?',
+                    (book_id,)
+                ).fetchone()
             finally:
                 con.close()
+
             if row and row[0]:
-                resolved = os.path.join(self.calibre_library, row[0])
-                resolved = resolved if resolved.endswith(os.sep) else resolved + os.sep
+                resolved = os.path.join(
+                    self.calibre_library,
+                    row[0]
+                )
+
+                resolved = (
+                    resolved
+                    if resolved.endswith(os.sep)
+                    else resolved + os.sep
+                )
+
                 if os.path.isdir(resolved):
+                    supported_files = self.get_supported_files_from_dir(
+                        resolved
+                    )
+
+                    # metadata.db is Calibre's authoritative location.
+                    # If the directory exists and contains a supported book
+                    # format, use it immediately.
+                    if supported_files:
+                        if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                            print(
+                                "[cover-metadata-enforcer] "
+                                f"Resolved book {book_id} from metadata.db: "
+                                f"{resolved}",
+                                flush=True,
+                            )
+
+                        log_info['file_path'] = resolved
+                        return resolved
+
+                    # Directory exists but no supported format was found.
+                    # Keep it as the strongest fallback candidate.
                     candidate_dirs.append(resolved)
-                    if self.args and getattr(self.args, 'verbose', False):
-                        print(f"[cover-metadata-enforcer] Candidate from DB: {resolved}", flush=True)
+
+                    if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                        print(
+                            "[cover-metadata-enforcer] "
+                            f"Candidate from DB contains no supported files: "
+                            f"{resolved}",
+                            flush=True,
+                        )
+
         except Exception as e:
-            if self.args and getattr(self.args, 'verbose', False):
-                print(f"[cover-metadata-enforcer] WARN: DB lookup failed for id={book_id}: {e}", flush=True)
+            if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                print(
+                    "[cover-metadata-enforcer] WARN: "
+                    f"DB lookup failed for id={book_id}: {e}",
+                    flush=True,
+                )
 
-        # 2) All directories that end with (book_id)
+        # ------------------------------------------------------------------
+        # 2) Search library for directories ending in "(book_id)"
+        # ------------------------------------------------------------------
         target_suffix = f"({book_id})"
-        try:
-            for dirpath, dirnames, _ in os.walk(self.calibre_library):
-                for d in dirnames:
-                    if d.endswith(target_suffix):
-                        p = os.path.join(dirpath, d)
-                        p = p if p.endswith(os.sep) else p + os.sep
-                        if os.path.isdir(p):
-                            candidate_dirs.append(p)
-            if self.args and getattr(self.args, 'verbose', False):
-                if candidate_dirs:
-                    print(f"[cover-metadata-enforcer] Found {len(candidate_dirs)} candidate(s) including DB/ID-search", flush=True)
-        except Exception:
-            pass
 
-        # 3) Reconstruct from log names using EXACT CW sanitization
-        raw_title = str(log_info.get('title', '')).strip()
-        # CW uses only the first author to build the folder
-        raw_author_full = str(log_info.get('authors', '')).strip().replace(' & ', ', ')
-        raw_author = raw_author_full.split(', ')[0] if ', ' in raw_author_full else raw_author_full
-
-        # Build both transliterated and non-transliterated variants using shared sanitizer
-        # Guard against empty/invalid values to avoid crashing on fresh/partial metadata
         try:
-            title_ascii = get_valid_filename_shared(raw_title, chars=96, unicode_filename=True)
+            for dirpath, dirnames, _ in os.walk(
+                self.calibre_library
+            ):
+                for dirname in dirnames:
+                    if not dirname.endswith(target_suffix):
+                        continue
+
+                    candidate = os.path.join(
+                        dirpath,
+                        dirname
+                    )
+
+                    candidate = (
+                        candidate
+                        if candidate.endswith(os.sep)
+                        else candidate + os.sep
+                    )
+
+                    if not os.path.isdir(candidate):
+                        continue
+
+                    # If this ID-matched directory actually contains a book,
+                    # use it immediately.
+                    supported_files = (
+                        self.get_supported_files_from_dir(candidate)
+                    )
+
+                    if supported_files:
+                        if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                            print(
+                                "[cover-metadata-enforcer] "
+                                f"Resolved book {book_id} via ID search: "
+                                f"{candidate}",
+                                flush=True,
+                            )
+
+                        log_info['file_path'] = candidate
+                        return candidate
+
+                    candidate_dirs.append(candidate)
+
+        except Exception as e:
+            if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                print(
+                    "[cover-metadata-enforcer] WARN: "
+                    f"ID directory search failed for id={book_id}: {e}",
+                    flush=True,
+                )
+
+        # ------------------------------------------------------------------
+        # 3) Reconstruct path from change-log metadata
+        # ------------------------------------------------------------------
+        raw_title = str(
+            log_info.get('title') or ''
+        ).strip()
+
+        if not raw_title:
+            raw_title = f"book_{book_id}"
+
+        # Metadata-change logs may contain:
+        #
+        #   "authors": ["Author Name"]
+        #
+        # or:
+        #
+        #   "authors": []
+        #
+        # Do NOT convert [] into the literal filesystem name "[]".
+        authors = log_info.get('authors') or []
+
+        if isinstance(authors, (list, tuple)):
+            raw_author = (
+                str(authors[0]).strip()
+                if authors
+                else "Unknown"
+            )
+        else:
+            raw_author_full = (
+                str(authors)
+                .strip()
+                .replace(' & ', ', ')
+            )
+
+            raw_author = (
+                raw_author_full.split(', ')[0]
+                if ', ' in raw_author_full
+                else raw_author_full
+            )
+
+        if not raw_author:
+            raw_author = "Unknown"
+
+        # Build both transliterated and non-transliterated variants using
+        # the same filename sanitizer used elsewhere by Calibre-Web.
+        try:
+            title_ascii = get_valid_filename_shared(
+                raw_title,
+                chars=96,
+                unicode_filename=True,
+            )
         except Exception:
-            # Fallback: minimal safe title using book id
             title_ascii = f"book_{book_id}"
+
         try:
-            author_ascii = get_valid_filename_shared(raw_author, chars=96, unicode_filename=True)
+            author_ascii = get_valid_filename_shared(
+                raw_author,
+                chars=96,
+                unicode_filename=True,
+            )
         except Exception:
-            author_ascii = "Unknown Author"
+            author_ascii = "Unknown"
+
         try:
-            title_raw = get_valid_filename_shared(raw_title, chars=96, unicode_filename=False)
+            title_raw = get_valid_filename_shared(
+                raw_title,
+                chars=96,
+                unicode_filename=False,
+            )
         except Exception:
             title_raw = f"book_{book_id}"
+
         try:
-            author_raw = get_valid_filename_shared(raw_author, chars=96, unicode_filename=False)
+            author_raw = get_valid_filename_shared(
+                raw_author,
+                chars=96,
+                unicode_filename=False,
+            )
         except Exception:
-            author_raw = "Unknown Author"
+            author_raw = "Unknown"
 
-        reconstructed_ascii = os.path.join(self.calibre_library, author_ascii, f"{title_ascii} ({book_id})")
-        reconstructed_raw = os.path.join(self.calibre_library, author_raw, f"{title_raw} ({book_id})")
-        # Prefer ASCII first when config demands transliteration
-        recon_order = [reconstructed_ascii, reconstructed_raw] if self.unicode_filename else [reconstructed_raw, reconstructed_ascii]
-        candidate_dirs.extend([(p if p.endswith(os.sep) else p + os.sep) for p in recon_order])
+        reconstructed_ascii = os.path.join(
+            self.calibre_library,
+            author_ascii,
+            f"{title_ascii} ({book_id})",
+        )
 
-        # Deduplicate while preserving order
+        reconstructed_raw = os.path.join(
+            self.calibre_library,
+            author_raw,
+            f"{title_raw} ({book_id})",
+        )
+
+        recon_order = (
+            [reconstructed_ascii, reconstructed_raw]
+            if self.unicode_filename
+            else [reconstructed_raw, reconstructed_ascii]
+        )
+    
+        for candidate in recon_order:
+            candidate = (
+                candidate
+                if candidate.endswith(os.sep)
+                else candidate + os.sep
+            )
+    
+            if candidate not in candidate_dirs:
+                candidate_dirs.append(candidate)
+
+        # ------------------------------------------------------------------
+        # 4) Check remaining candidates
+        # ------------------------------------------------------------------
         seen = set()
-        deduped_candidates = []
-        for c in candidate_dirs:
-            if c not in seen:
-                seen.add(c)
-                deduped_candidates.append(c)
 
-        # Split into preferred vs alternate based on config_unicode_filename
-        def is_preferred(path: str) -> bool:
-            base = author_ascii if self.unicode_filename else author_raw
-            return path.startswith(os.path.join(self.calibre_library, base) + os.sep)
+        for candidate in candidate_dirs:
+            if candidate in seen:
+                continue
 
-        preferred_candidates = [c for c in deduped_candidates if is_preferred(c)]
-        alternate_candidates = [c for c in deduped_candidates if not is_preferred(c)]
+            seen.add(candidate)
 
-        # Choose the first candidate that exists and contains supported files (preferred first)
-        for group_name, group in (("preferred", preferred_candidates), ("alternate", alternate_candidates)):
-            for c in group:
-                if os.path.isdir(c):
-                    sf = self.get_supported_files_from_dir(c)
-                    if sf:
-                        if self.args and getattr(self.args, 'verbose', False):
-                            print(f"[cover-metadata-enforcer] Selected {group_name} candidate with supported files: {c}", flush=True)
-                        log_info['file_path'] = c
-                        return c
+            if not os.path.isdir(candidate):
+                continue
 
-        # If none have supported files, but some dirs exist, choose best available (prefer ASCII if exists)
-        existing_pref = [c for c in preferred_candidates if os.path.isdir(c)]
-        existing_alt = [c for c in alternate_candidates if os.path.isdir(c)]
-        existing = existing_pref or existing_alt
-        if existing:
-            # Try to pick ASCII-looking path if config is True
-            preferred = None
-            for c in existing_pref:
-                preferred = c
-                break
-            if not preferred:
-                preferred = existing[0]
-            if self.args and getattr(self.args, 'verbose', False):
-                print(f"[cover-metadata-enforcer] No supported files in candidates; falling back to existing dir: {preferred}", flush=True)
-            log_info['file_path'] = preferred
-            return preferred
+            supported_files = (
+                self.get_supported_files_from_dir(candidate)
+            )
 
-        # Nothing exists; fall back to reconstructed path that matches config
-        fallback = (reconstructed_ascii if self.unicode_filename else reconstructed_raw)
-        fallback = fallback if fallback.endswith(os.sep) else fallback + os.sep
-        if self.args and getattr(self.args, 'verbose', False):
-            print(f"[cover-metadata-enforcer] Resolved via reconstructed path (not found on disk): {fallback}", flush=True)
+            if supported_files:
+                if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                    print(
+                        "[cover-metadata-enforcer] "
+                        f"Resolved book {book_id} from fallback candidate: "
+                        f"{candidate}",
+                        flush=True,
+                    )
+    
+                log_info['file_path'] = candidate
+                return candidate
+
+        # ------------------------------------------------------------------
+        # 5) Existing directory fallback
+        # ------------------------------------------------------------------
+        for candidate in candidate_dirs:
+            if os.path.isdir(candidate):
+                if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+                    print(
+                        "[cover-metadata-enforcer] "
+                        "No supported files found; "
+                        f"using existing directory: {candidate}",
+                        flush=True,
+                    )
+
+                log_info['file_path'] = candidate
+                return candidate
+
+        # ------------------------------------------------------------------
+        # 6) Nothing exists
+        # ------------------------------------------------------------------
+        fallback = (
+            reconstructed_ascii
+            if self.unicode_filename
+            else reconstructed_raw
+        )
+
+        fallback = (
+            fallback
+            if fallback.endswith(os.sep)
+            else fallback + os.sep
+        )
+
+        if os.environ.get("CWA_VERBOSE", "").lower() in ("1", "true", "yes"):
+            print(
+                "[cover-metadata-enforcer] "
+                "No existing directory found; "
+                f"using reconstructed path: {fallback}",
+                flush=True,
+            )
+
         log_info['file_path'] = fallback
         return fallback
 
